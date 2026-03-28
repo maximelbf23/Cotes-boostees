@@ -1,0 +1,26 @@
+# Virtual environment
+.venv/
+venv/
+
+# Streamlit secrets (contient tes clés Google et PIN)
+.streamlit/secrets.toml
+
+# Google service account key
+*.json
+!package.json
+
+# Local data files
+cotes_boostees.xlsx
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
