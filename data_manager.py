@@ -125,52 +125,78 @@ def _compute_gain_reel(row):
 
 
 def save_bet(sheet_name: str, bet: dict):
-    ws = get_worksheet(sheet_name)
-    
-    mise = float(bet.get("Misé", 0))
-    cote_b = float(bet.get("Cote boostée", 0))
-    gains_possible = round(mise * cote_b, 2)
-    status = bet.get("Validé ?", "?")
-    
-    if status == "✅":
-        gain_reel = round(gains_possible - mise, 2)
-    elif status == "❌":
-        gain_reel = round(-mise, 2)
-    else:
-        gain_reel = 0.0
+    def _safe_float(val, default=0.0):
+        try:
+            if pd.isna(val):
+                return default
+            return float(str(val).replace(",", ".").replace("€", "").strip())
+        except (ValueError, TypeError):
+            return default
 
-    # Format date properly
-    bet_date = bet.get("Date")
-    date_str = ""
-    if hasattr(bet_date, "strftime"):
-        date_str = bet_date.strftime("%Y-%m-%d %H:%M:%S")
-    else:
-        date_str = str(bet_date) if bet_date else ""
+    def _safe_str(val, default=""):
+        try:
+            if pd.isna(val):
+                return default
+            return str(val).strip()
+        except (ValueError, TypeError):
+            return default
 
-    row_data = [
-        date_str,
-        str(bet.get("Heure", "")),
-        str(bet.get("Sport", "")),
-        str(bet.get("Événement", "")),
-        str(bet.get("Pari", "")),
-        float(bet.get("Cote initiale", 0)),
-        cote_b,
-        status,
-        mise,
-        gains_possible,
-        gain_reel,
-        ""  # Cumul is computed on load
-    ]
-    
-    # gspread expects python primitives
-    formatted_row = []
-    for x in row_data:
-        if pd.isna(x):
-            formatted_row.append("")
+    try:
+        ws = get_worksheet(sheet_name)
+        
+        mise = _safe_float(bet.get("Misé", 0))
+        cote_b = _safe_float(bet.get("Cote boostée", 0))
+        gains_possible = round(mise * cote_b, 2)
+        status = _safe_str(bet.get("Validé ?", "?"), "?")
+        
+        if status == "✅":
+            gain_reel = round(gains_possible - mise, 2)
+        elif status == "❌":
+            gain_reel = round(-mise, 2)
         else:
-            formatted_row.append(str(x))
-            
-    ws.append_row(formatted_row, value_input_option='USER_ENTERED')
+            gain_reel = 0.0
+
+        # Format date properly
+        bet_date = bet.get("Date")
+        date_str = ""
+        if pd.notna(bet_date) and hasattr(bet_date, "strftime"):
+            date_str = bet_date.strftime("%Y-%m-%d %H:%M:%S")
+        elif pd.notna(bet_date):
+            date_str = str(bet_date)
+
+        row_data = [
+            date_str,
+            _safe_str(bet.get("Heure", "")),
+            _safe_str(bet.get("Sport", "")),
+            _safe_str(bet.get("Événement", "")),
+            _safe_str(bet.get("Pari", "")),
+            _safe_float(bet.get("Cote initiale", 0)),
+            cote_b,
+            status,
+            mise,
+            gains_possible,
+            gain_reel,
+            ""  # Cumul is computed on load
+        ]
+        
+        # gspread expects python primitives
+        formatted_row = []
+        for x in row_data:
+            try:
+                if pd.isna(x):
+                    formatted_row.append("")
+                else:
+                    formatted_row.append(str(x))
+            except (ValueError, TypeError):
+                formatted_row.append(str(x))
+                
+        ws.append_row(formatted_row, value_input_option='USER_ENTERED')
+        print(f"[save_bet] Saved to {sheet_name}: {formatted_row[:5]}...")
+    except Exception as e:
+        import traceback
+        print(f"[save_bet] ERROR saving to {sheet_name}: {type(e).__name__}: {e}")
+        traceback.print_exc()
+        raise
 
 
 def update_result(sheet_name: str, event: str, pari: str, bet_date, result: str, mise_reelle: float = None):

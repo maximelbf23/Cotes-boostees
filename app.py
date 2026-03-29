@@ -715,12 +715,15 @@ elif page == "👤 Mes paris":
                     _heure = sr.get("Heure", "")
                     hp = st.text_input("Heure",value=str(_heure) if pd.notna(_heure) else "",key="me_hg")
                 if st.button("✅ Ajouter à mes paris",use_container_width=True,key="me_ag"):
-                    save_bet(SHEET_PERSO,{"Date":sr["Date"],"Heure":hp,"Sport":sr["Sport"],
-                        "Événement":sr["Événement"],"Pari":sr["Pari"],
-                        "Cote initiale":sr["Cote initiale"],"Cote boostée":sr["Cote boostée"],
-                        "Misé":mp,"Validé ?":rp})
-                    st.success("Ajouté !")
-                    refresh()
+                    try:
+                        save_bet(SHEET_PERSO,{"Date":sr["Date"],"Heure":hp,"Sport":sr["Sport"],
+                            "Événement":sr["Événement"],"Pari":sr["Pari"],
+                            "Cote initiale":sr["Cote initiale"],"Cote boostée":sr["Cote boostée"],
+                            "Misé":mp,"Validé ?":rp})
+                        st.success("Ajouté !")
+                        refresh()
+                    except Exception as e:
+                        st.error(f"Erreur lors de l'ajout : {e}")
         else:
             with st.form("form_add_me"):
                 c1,c2,c3 = st.columns(3)
