@@ -190,7 +190,7 @@ def save_bet(sheet_name: str, bet: dict):
             except (ValueError, TypeError):
                 formatted_row.append(str(x))
                 
-        ws.append_row(formatted_row, value_input_option='USER_ENTERED')
+        ws.append_row(formatted_row, value_input_option='USER_ENTERED', table_range='A:L')
         print(f"[save_bet] Saved to {sheet_name}: {formatted_row[:5]}...")
     except Exception as e:
         import traceback
