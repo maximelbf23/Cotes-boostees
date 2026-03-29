@@ -160,9 +160,12 @@ def save_bet(sheet_name: str, bet: dict):
         bet_date = bet.get("Date")
         date_str = ""
         if pd.notna(bet_date) and hasattr(bet_date, "strftime"):
-            date_str = bet_date.strftime("%Y-%m-%d %H:%M:%S")
+            date_str = bet_date.strftime("%d/%m/%Y")
         elif pd.notna(bet_date):
-            date_str = str(bet_date)
+            try:
+                date_str = pd.to_datetime(bet_date).strftime("%d/%m/%Y")
+            except Exception:
+                date_str = str(bet_date)
 
         row_data = [
             date_str,

@@ -713,7 +713,7 @@ elif page == "👤 Mes paris":
                     rp = st.selectbox("Résultat",["?","✅","❌"],key="me_rg",
                                        help="? si le résultat n'est pas encore connu.")
                     _heure = sr.get("Heure", "")
-                    hp = st.text_input("Heure",value=str(_heure) if pd.notna(_heure) else "",key="me_hg")
+                    hp = str(_heure) if pd.notna(_heure) else ""
                 if st.button("✅ Ajouter à mes paris",use_container_width=True,key="me_ag"):
                     try:
                         save_bet(SHEET_PERSO,{"Date":sr["Date"],"Heure":hp,"Sport":sr["Sport"],
