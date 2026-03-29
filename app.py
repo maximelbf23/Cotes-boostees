@@ -720,8 +720,8 @@ elif page == "👤 Mes paris":
                             "Événement":sr["Événement"],"Pari":sr["Pari"],
                             "Cote initiale":sr["Cote initiale"],"Cote boostée":sr["Cote boostée"],
                             "Misé":mp,"Validé ?":rp})
-                        st.success("Ajouté !")
-                        refresh()
+                        st.success("✅ Pari ajouté avec succès !")
+                        st.cache_data.clear()
                     except Exception as e:
                         st.error(f"Erreur lors de l'ajout : {e}")
         else:
