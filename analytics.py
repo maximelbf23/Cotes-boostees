@@ -478,3 +478,18 @@ def generate_recommendations(df: pd.DataFrame) -> list[dict]:
     if not recs:
         recs.append({"level": "info", "text": "Continue à alimenter tes données pour des recommandations plus précises."})
     return recs
+
+
+# ── Rolling win rate ──────────────────────────────────────────────────────────
+
+def rolling_win_rate(df: pd.DataFrame, window: int = 5) -> pd.DataFrame:
+    """Rolling win rate over the last `window` bets + global expanding mean."""
+    played = df[df["Validé ?"].isin(["✅", "❌"])].reset_index(drop=True).copy()
+    if len(played) < window:
+        return pd.DataFrame()
+    played["N"]   = range(1, len(played) + 1)
+    played["Won"] = (played["Validé ?"] == "✅").astype(int)
+    col_roll = f"Win Rate roulant ({window} paris) %"
+    played[col_roll]             = (played["Won"].rolling(window, min_periods=window).mean() * 100).round(1)
+    played["Win Rate global %"]  = (played["Won"].expanding().mean() * 100).round(1)
+    return played[["N", col_roll, "Win Rate global %"]].dropna(subset=[col_roll])

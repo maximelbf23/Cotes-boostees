@@ -13,7 +13,7 @@ from analytics import (
     compute_stats, stats_by_sport, stats_by_type, stats_by_day, stats_by_hour,
     boost_efficiency, stats_by_odds_range, kelly_by_sport,
     heatmap_sport_day, simulate_kelly_bankroll, trend_stats,
-    generate_recommendations, streak_stats,
+    generate_recommendations, streak_stats, rolling_win_rate,
 )
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -273,6 +273,17 @@ df_me  = _ensure_datetime(df_me)
 
 df_analysis = df_gen if target == "Catalogue général" else df_me
 
+# ── Sidebar data summary (injected after data load) ───────────────────────────
+_sg = compute_stats(df_gen)
+_sm = compute_stats(df_me)
+st.sidebar.markdown(
+    f"<div style='font-size:.75rem;color:#64748b;line-height:1.8'>"
+    f"📋 <b>Catalogue</b> : {len(df_gen)} paris · {_sg['total']} terminés<br>"
+    f"👤 <b>Mes paris</b>  : {len(df_me)} paris · {_sm['total']} terminés"
+    f"</div>",
+    unsafe_allow_html=True,
+)
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # DASHBOARD
@@ -427,9 +438,8 @@ if page == "🏠 Dashboard":
                 mode="lines", line=dict(color="#818cf8",width=2.5),
                 fill="tozeroy", fillcolor="rgba(129,140,248,.1)",
                 hovertemplate="Pari #%{x}<br><b>%{y:+.2f} €</b><extra></extra>"))
-            w = played_g[played_g["Validé ?"]==" ✅"] if "✅" not in played_g["Validé ?"].values else played_g[played_g["Validé ?"]=="✅"]
-            l = played_g[played_g["Validé ?"]=="❌"]
             w2 = played_g[played_g["Validé ?"]=="✅"]
+            l  = played_g[played_g["Validé ?"]=="❌"]
             fig.add_trace(go.Scatter(x=w2["N"], y=w2["Cumul"], mode="markers",
                 marker=dict(color="#4ade80",size=6), name="Gagné",
                 hovertemplate="%{y:+.2f} €<extra>✅</extra>"))
@@ -517,28 +527,20 @@ elif page == "📋 Catalogue général":
                 refresh()
 
         dv = df_gen.copy()
-        if sf  != "Tous": dv = dv[dv["Sport"]==sf]
-        if df_f!= "Toutes":
+        if sf2 == "✅ Gagné":        dv = dv[dv["Validé ?"] == "✅"]
+        elif sf2 == "❌ Perdu":      dv = dv[dv["Validé ?"] == "❌"]
+        elif sf2 == "⏳ En attente": dv = dv[dv["Validé ?"] == "?"]
+        if sf != "Tous":             dv = dv[dv["Sport"] == sf]
+        if df_f != "Toutes":
             sd = pd.to_datetime(df_f, format="%d/%m/%Y")
-            dv = dv[dv["Date"].dt.date==sd.date()]
-        if sf2 == "✅ Gagné":       dv = dv[dv["Validé ?"]==" ✅"] if "✅" not in dv["Validé ?"].values else dv[dv["Validé ?"]=="✅"]
-        elif sf2 == "❌ Perdu":     dv = dv[dv["Validé ?"]=="❌"]
-        elif sf2 == "⏳ En attente":dv = dv[dv["Validé ?"]=="?"]
-
-        # fix filter
-        if sf2 == "✅ Gagné":   dv = df_gen.copy(); dv = dv[dv["Validé ?"]=="✅"]
-        if sf2 == "❌ Perdu":   dv = df_gen.copy(); dv = dv[dv["Validé ?"]=="❌"]
-        if sf2 == "⏳ En attente": dv = df_gen.copy(); dv = dv[dv["Validé ?"]=="?"]
-        if sf  != "Tous": dv = dv[dv["Sport"]==sf]
-        if df_f!= "Toutes":
-            sd = pd.to_datetime(df_f, format="%d/%m/%Y")
-            dv = dv[dv["Date"].dt.date==sd.date()]
+            dv = dv[dv["Date"].dt.date == sd.date()]
 
         colinfo, colexp = st.columns([8,2])
         with colinfo: st.caption(f"{len(dv)} paris affichés")
         with colexp:  export_button(dv, "catalogue.csv", "📥 CSV")
 
         disp = dv[["Date","Heure","Sport","Événement","Pari","Cote initiale","Cote boostée","Validé ?","Misé","Gain réel"]].copy()
+        disp = disp.sort_values("Date", ascending=False)
         disp["Date"] = disp["Date"].dt.strftime("%d/%m").fillna("")
         st.dataframe(disp, hide_index=True, use_container_width=True,
             column_config={
@@ -571,6 +573,7 @@ elif page == "📋 Catalogue général":
                 if st.button("💾 Sauvegarder",key="g_save"):
                     update_result(SHEET_GENERAL,sr["Événement"],sr["Pari"],sr["Date"],
                                   "✅" if "Gagné" in nr else "❌",nm)
+                    st.toast("Résultat enregistré !", icon="💾")
                     st.success("Mis à jour !")
                     refresh()
 
@@ -607,6 +610,7 @@ elif page == "📋 Catalogue général":
                     save_bet(SHEET_GENERAL,{"Date":datetime.combine(fd,datetime.min.time()),
                         "Heure":fh,"Sport":fs,"Événement":fe,"Pari":fp,
                         "Cote initiale":fci,"Cote boostée":fcb,"Misé":fm,"Validé ?":fr})
+                    st.toast(f"✅ Pari ajouté : {fe}", icon="✅")
                     st.success(f"✅ Ajouté : {fe}")
                     refresh()
 
@@ -720,6 +724,7 @@ elif page == "👤 Mes paris":
                             "Événement":sr["Événement"],"Pari":sr["Pari"],
                             "Cote initiale":sr["Cote initiale"],"Cote boostée":sr["Cote boostée"],
                             "Misé":mp,"Validé ?":rp})
+                        st.toast(f"✅ Ajouté à mes paris : {sr['Événement']}", icon="✅")
                         st.success("✅ Pari ajouté avec succès !")
                         st.cache_data.clear()
                     except Exception as e:
@@ -770,6 +775,7 @@ elif page == "👤 Mes paris":
                 if st.button("💾 Sauvegarder",key="me_sv"):
                     update_result(SHEET_PERSO,smr["Événement"],smr["Pari"],smr["Date"],
                                   "✅" if "Gagné" in nrm else "❌",nmm)
+                    st.toast("Résultat enregistré !", icon="💾")
                     st.success("Mis à jour !")
                     refresh()
 
@@ -872,9 +878,40 @@ elif page == "📈 Analyses":
 
     st.divider()
 
+    # ── Win Rate roulant ──────────────────────────────────────────────────────
+    rw_window = 5
+    rw_df = rolling_win_rate(df_a, window=rw_window)
+    if not rw_df.empty:
+        col_roll = f"Win Rate roulant ({rw_window} paris) %"
+        section_header(f"Win Rate roulant ({rw_window} paris)",
+            f"Chaque point = win rate calculé sur les **{rw_window} derniers paris**. "
+            "Permet de voir si tu es en forme ou en difficulté en ce moment. "
+            "**Ligne pointillée** = win rate global depuis le début. "
+            "Une courbe qui monte = amélioration de la sélection.")
+        fig_rw = go.Figure()
+        fig_rw.add_trace(go.Scatter(
+            x=rw_df["N"], y=rw_df[col_roll],
+            mode="lines+markers", name=f"Win Rate roulant ({rw_window})",
+            line=dict(color="#818cf8", width=2.5),
+            marker=dict(size=5),
+            hovertemplate="Pari #%{x}<br>Win Rate roulant : <b>%{y:.1f}%</b><extra></extra>"))
+        fig_rw.add_trace(go.Scatter(
+            x=rw_df["N"], y=rw_df["Win Rate global %"],
+            mode="lines", name="Win Rate global",
+            line=dict(color="#fbbf24", width=1.5, dash="dot"),
+            hovertemplate="Pari #%{x}<br>Win Rate global : %{y:.1f}%<extra></extra>"))
+        fig_rw.add_hline(y=50, line_dash="dash", line_color="rgba(255,255,255,.15)",
+                          annotation_text="50%", annotation_font_color="#64748b")
+        fig_rw.update_layout(**_chart(height=260, showlegend=True,
+                                       legend=dict(orientation="h", y=1.15),
+                                       yaxis=dict(ticksuffix="%", range=[0, 105])))
+        st.plotly_chart(fig_rw, use_container_width=True)
+        st.divider()
+
     # ── P&L mensuel ───────────────────────────────────────────────────────────
     section_header("P&L mensuel",
-        "Bénéfice net par mois. Les barres **vertes** = mois profitable, **rouges** = mois en perte. "
+        "**Barres** = bénéfice net du mois (vert = profitable, rouge = en perte). "
+        "**Ligne cyan** = Win Rate du mois (axe droit). "
         "Permet de voir si tes performances s'améliorent avec le temps.")
     if not played["Date"].isna().all():
         monthly = played.copy()
@@ -887,16 +924,26 @@ elif page == "📈 Analyses":
             })
         ).reset_index()
         if not monthly_pnl.empty:
-            fig_monthly = go.Figure(go.Bar(
+            fig_monthly = go.Figure()
+            fig_monthly.add_trace(go.Bar(
                 x=monthly_pnl["Mois"], y=monthly_pnl["Bénéfice"],
-                marker_color=monthly_pnl["Bénéfice"].apply(lambda x: "#4ade80" if x>=0 else "#f87171"),
+                name="Bénéfice (€)",
+                marker_color=monthly_pnl["Bénéfice"].apply(lambda x: "#4ade80" if x >= 0 else "#f87171"),
                 text=monthly_pnl["Bénéfice"].apply(lambda x: f"{x:+.2f} €"),
                 textposition="outside",
-                hovertemplate="<b>%{x}</b><br>Bénéfice : %{y:+.2f} €<br>%{customdata[0]} paris · %{customdata[1]:.0f}% win rate<extra></extra>",
-                customdata=monthly_pnl[["Paris","Win Rate %"]].values,
+                hovertemplate="<b>%{x}</b><br>Bénéfice : %{y:+.2f} €<br>%{customdata[0]} paris<extra></extra>",
+                customdata=monthly_pnl[["Paris"]].values,
             ))
+            fig_monthly.add_trace(go.Scatter(
+                x=monthly_pnl["Mois"], y=monthly_pnl["Win Rate %"],
+                name="Win Rate %", yaxis="y2", mode="lines+markers",
+                line=dict(color="#22d3ee", width=2), marker=dict(size=7),
+                hovertemplate="%{x}<br>Win Rate : %{y:.0f}%<extra></extra>"))
             fig_monthly.add_hline(y=0, line_dash="dash", line_color="rgba(255,255,255,.2)")
-            fig_monthly.update_layout(**_chart(height=260, title="Bénéfice net par mois"))
+            fig_monthly.update_layout(**_chart(height=280, title="Bénéfice net et Win Rate par mois",
+                yaxis2=dict(overlaying="y", side="right", title="Win Rate %",
+                            color="#22d3ee", showgrid=False, ticksuffix="%", range=[0, 105]),
+                legend=dict(orientation="h", y=1.15)))
             st.plotly_chart(fig_monthly, use_container_width=True)
 
     st.divider()
@@ -1066,21 +1113,81 @@ elif page == "📈 Analyses":
 
     st.divider()
 
-    # ── Scatter cote vs gain ──────────────────────────────────────────────────
-    section_header("Cote boostée vs Gain réel",
-        "Chaque bulle = un pari. **Taille** = mise. **Vert** = gagné, **Rouge** = perdu. "
-        "Idéalement : bulles vertes en haut à droite (grosse cote + gros gain), "
-        "rouges en bas à gauche (petite mise perdue).")
-    played2 = played.copy()
-    played2["Résultat"] = played2["Validé ?"].map({"✅":"Gagné","❌":"Perdu"})
-    fig_sc = px.scatter(played2, x="Cote boostée", y="Gain réel", color="Résultat",
-        color_discrete_map={"Gagné":"#4ade80","Perdu":"#f87171"},
-        size="Misé", size_max=18,
-        hover_data=["Événement","Pari","Sport","Date"],
-        title="Chaque bulle = un pari (taille = mise)")
-    fig_sc.add_hline(y=0, line_dash="dash", line_color="rgba(255,255,255,.2)")
-    fig_sc.update_layout(**_chart(height=360))
-    st.plotly_chart(fig_sc, use_container_width=True)
+    # ── Scatter cote vs gain + Distribution des mises ─────────────────────────
+    col_sc, col_hist = st.columns([3, 2])
+    with col_sc:
+        section_header("Cote boostée vs Gain réel",
+            "Chaque bulle = un pari. **Taille** = mise. **Vert** = gagné, **Rouge** = perdu. "
+            "Idéalement : bulles vertes en haut à droite (grosse cote + gros gain), "
+            "rouges en bas à gauche (petite mise perdue).")
+        played2 = played.copy()
+        played2["Résultat"] = played2["Validé ?"].map({"✅":"Gagné","❌":"Perdu"})
+        fig_sc = px.scatter(played2, x="Cote boostée", y="Gain réel", color="Résultat",
+            color_discrete_map={"Gagné":"#4ade80","Perdu":"#f87171"},
+            size="Misé", size_max=18,
+            hover_data=["Événement","Pari","Sport","Date"],
+            title="Chaque bulle = un pari (taille = mise)")
+        fig_sc.add_hline(y=0, line_dash="dash", line_color="rgba(255,255,255,.2)")
+        fig_sc.update_layout(**_chart(height=340))
+        st.plotly_chart(fig_sc, use_container_width=True)
+
+    with col_hist:
+        section_header("Distribution des mises",
+            "Histogramme de la répartition de tes mises. "
+            "Montre si tu mises de façon homogène ou si tu varies beaucoup. "
+            "Une gestion de bankroll saine implique des mises régulières et limitées.")
+        if "Misé" in played.columns and played["Misé"].notna().any():
+            mise_data = played["Misé"].dropna()
+            fig_hist = go.Figure(go.Histogram(
+                x=mise_data,
+                nbinsx=min(15, len(mise_data)),
+                marker_color="#818cf8",
+                marker_line=dict(color="#1e1b4b", width=1),
+                hovertemplate="Mise %{x:.1f} € : <b>%{y} paris</b><extra></extra>",
+            ))
+            mean_mise = mise_data.mean()
+            fig_hist.add_vline(x=mean_mise, line_dash="dash", line_color="#fbbf24",
+                               annotation_text=f"Moy. {mean_mise:.1f} €",
+                               annotation_font_color="#fbbf24")
+            fig_hist.update_layout(**_chart(height=340, title="Répartition des mises (€)",
+                                            xaxis_title="Mise (€)", yaxis_title="Nombre de paris"))
+            st.plotly_chart(fig_hist, use_container_width=True)
+
+            m1, m2, m3 = st.columns(3)
+            with m1: st.metric("Mise min", f"{mise_data.min():.2f} €")
+            with m2: st.metric("Mise moy.", f"{mean_mise:.2f} €")
+            with m3: st.metric("Mise max", f"{mise_data.max():.2f} €")
+
+    st.divider()
+
+    # ── Palmarès ──────────────────────────────────────────────────────────────
+    section_header("Palmarès — Meilleurs & Pires paris",
+        "**Top 5 gains** = tes paris les plus rentables (gain net le plus élevé). "
+        "**Pires 5** = les paris qui t'ont le plus coûté. "
+        "Utile pour identifier les types de paris à répéter (ou éviter).")
+    col_top, col_flop = st.columns(2)
+    with col_top:
+        st.markdown('<p style="color:#4ade80;font-weight:600;margin-bottom:6px">🏆 Top 5 — Meilleurs gains</p>', unsafe_allow_html=True)
+        top5 = played.nlargest(5, "Gain réel")[["Date","Sport","Événement","Pari","Cote boostée","Misé","Gain réel","Validé ?"]].copy()
+        top5["Date"] = top5["Date"].dt.strftime("%d/%m").fillna("")
+        top5["Pari"] = top5["Pari"].apply(lambda x: str(x)[:40])
+        st.dataframe(top5, hide_index=True, use_container_width=True,
+            column_config={
+                "Cote boostée": st.column_config.NumberColumn(format="%.2f"),
+                "Misé":         st.column_config.NumberColumn(format="%.2f €"),
+                "Gain réel":    st.column_config.NumberColumn(format="%.2f €"),
+            })
+    with col_flop:
+        st.markdown('<p style="color:#f87171;font-weight:600;margin-bottom:6px">💔 Pires 5 — Plus grosses pertes</p>', unsafe_allow_html=True)
+        flop5 = played.nsmallest(5, "Gain réel")[["Date","Sport","Événement","Pari","Cote boostée","Misé","Gain réel","Validé ?"]].copy()
+        flop5["Date"] = flop5["Date"].dt.strftime("%d/%m").fillna("")
+        flop5["Pari"] = flop5["Pari"].apply(lambda x: str(x)[:40])
+        st.dataframe(flop5, hide_index=True, use_container_width=True,
+            column_config={
+                "Cote boostée": st.column_config.NumberColumn(format="%.2f"),
+                "Misé":         st.column_config.NumberColumn(format="%.2f €"),
+                "Gain réel":    st.column_config.NumberColumn(format="%.2f €"),
+            })
 
     st.divider()
 
