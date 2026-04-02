@@ -248,7 +248,7 @@ def stats_by_hour(df: pd.DataFrame) -> pd.DataFrame:
             "Win Rate %":   wins / total * 100,
             "Bénéfice (€)": _benefice(g),
             "ROI %":        _roi(g) * 100,
-            "_order":       _ORDER.get(g["Créneau"].iloc[0], 9),
+            "_order":       _ORDER.get(g.name, 9),
         })
 
     result = played.groupby("Créneau").apply(agg).reset_index()
