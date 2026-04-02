@@ -9,12 +9,21 @@ from datetime import date, datetime
 
 from config import APP_PIN, USERNAME, PORT
 from data_manager import load_sheet, save_bet, update_result, SHEET_GENERAL, SHEET_PERSO
-from analytics import (
-    compute_stats, stats_by_sport, stats_by_type, stats_by_day, stats_by_hour,
-    boost_efficiency, stats_by_odds_range, kelly_by_sport,
-    heatmap_sport_day, simulate_kelly_bankroll, trend_stats,
-    generate_recommendations, streak_stats, rolling_win_rate, analyse_pending,
-)
+try:
+    from analytics import (
+        compute_stats, stats_by_sport, stats_by_type, stats_by_day, stats_by_hour,
+        boost_efficiency, stats_by_odds_range, kelly_by_sport,
+        heatmap_sport_day, simulate_kelly_bankroll, trend_stats,
+        generate_recommendations, streak_stats, rolling_win_rate, analyse_pending,
+    )
+except ImportError as e:
+    import streamlit as st
+    st.error(f"Erreur d'importation de 'analytics' : {e}")
+    st.stop()
+except Exception as e:
+    import streamlit as st
+    st.error(f"Une erreur est survenue lors du chargement des modules : {e}")
+    st.stop()
 
 # ── Config ────────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Cotes Boostées", page_icon="🎯",

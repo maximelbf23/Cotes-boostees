@@ -5,3 +5,7 @@ plotly>=5.18
 numpy>=1.26
 qrcode[pil]>=7.4
 gspread
+google-auth
+google-auth-oauthlib
+google-auth-httplib2
+pyarrow
