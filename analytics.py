@@ -480,6 +480,57 @@ def generate_recommendations(df: pd.DataFrame) -> list[dict]:
     return recs
 
 
+# ── Pending bets analysis ─────────────────────────────────────────────────────
+
+def analyse_pending(df: pd.DataFrame) -> pd.DataFrame:
+    """For each pending bet, estimate EV using sport-level historical win rate."""
+    pending = df[df["Validé ?"] == "?"].copy()
+    if pending.empty:
+        return pd.DataFrame()
+
+    played = df[df["Validé ?"].isin(["✅", "❌"])]
+    global_wr  = float((played["Validé ?"] == "✅").mean()) if not played.empty else 0.40
+    global_n   = len(played)
+
+    rows = []
+    for _, row in pending.iterrows():
+        sport        = row["Sport"]
+        sport_played = played[played["Sport"] == sport]
+        n_sport      = len(sport_played)
+
+        if n_sport >= 3:
+            wr      = float((sport_played["Validé ?"] == "✅").mean())
+            wr_src  = f"{sport} ({n_sport} paris)"
+        elif global_n > 0:
+            wr      = global_wr
+            wr_src  = f"Global ({global_n} paris)"
+        else:
+            wr      = 0.40
+            wr_src  = "Estimation (données insuffisantes)"
+
+        cote       = float(row["Cote boostée"])
+        mise       = float(row["Misé"])
+        ev         = round(wr * cote - 1, 3)
+        gain       = round(mise * (cote - 1), 2)
+        esperance  = round(mise * ev, 2)
+
+        rows.append({
+            "Date":               row["Date"],
+            "Sport":              sport,
+            "Événement":          row["Événement"],
+            "Pari":               str(row["Pari"])[:60],
+            "Cote":               cote,
+            "Mise (€)":           mise,
+            "Gain si ✅ (€)":     gain,
+            "Win Rate sport %":   round(wr * 100, 1),
+            "EV estimé":          ev,
+            "Espérance (€)":      esperance,
+            "_wr_src":            wr_src,
+        })
+
+    return pd.DataFrame(rows)
+
+
 # ── Rolling win rate ──────────────────────────────────────────────────────────
 
 def rolling_win_rate(df: pd.DataFrame, window: int = 5) -> pd.DataFrame:

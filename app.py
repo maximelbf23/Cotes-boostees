@@ -13,7 +13,7 @@ from analytics import (
     compute_stats, stats_by_sport, stats_by_type, stats_by_day, stats_by_hour,
     boost_efficiency, stats_by_odds_range, kelly_by_sport,
     heatmap_sport_day, simulate_kelly_bankroll, trend_stats,
-    generate_recommendations, streak_stats, rolling_win_rate,
+    generate_recommendations, streak_stats, rolling_win_rate, analyse_pending,
 )
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -148,12 +148,12 @@ hr { border-color:rgba(255,255,255,.07) !important; }
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-@st.cache_data(ttl=5)
-def get_data(sheet):
+@st.cache_data(ttl=60)
+def get_data(sheet, version=0):
     return load_sheet(sheet)
 
 def refresh():
-    st.cache_data.clear()
+    st.session_state["_dv"] = st.session_state.get("_dv", 0) + 1
     st.rerun()
 
 def kpi(label, value, color="blue", sub=None, help_text=None):
@@ -194,6 +194,50 @@ def trend_delta(current: float, reference: float, suffix="") -> str:
     return f'<span class="{cls}">({sign}{diff:.1f}{suffix})</span>'
 
 
+# ── Quick update dialog ───────────────────────────────────────────────────────
+@st.dialog("⚡ Résultat rapide", width="large")
+def quick_update_dialog():
+    _v   = st.session_state.get("_dv", 0)
+    src  = st.radio("Source", ["📋 Catalogue général", "👤 Mes paris"],
+                    horizontal=True, key="qud_src")
+    sheet_name = SHEET_GENERAL if "Catalogue" in src else SHEET_PERSO
+    df_q = get_data(sheet_name, version=_v)
+    df_q = _ensure_datetime_fn(df_q)
+    pending = df_q[df_q["Validé ?"] == "?"]
+    if pending.empty:
+        st.info("✅ Aucun pari en attente de résultat.")
+        return
+    opts = [
+        f"{pd.Timestamp(r['Date']).strftime('%d/%m') if pd.notna(r['Date']) else '?'}"
+        f"  ·  {r['Sport']}  ·  {r['Événement']} — {str(r['Pari'])[:50]}"
+        for _, r in pending.iterrows()
+    ]
+    si  = st.selectbox("Pari à mettre à jour", range(len(opts)),
+                       format_func=lambda i: opts[i], key="qud_sel")
+    sr  = pending.iloc[si]
+    st.info(f"**{sr['Événement']}**  ·  {str(sr['Pari'])[:80]}\n\n"
+            f"Cote boostée : **{sr['Cote boostée']:.2f}**  ·  Mise : {sr['Misé']:.2f} €")
+    col1, col2, col3 = st.columns([2, 2, 1])
+    with col1:
+        nr = st.radio("Résultat", ["✅ Gagné", "❌ Perdu"], horizontal=True, key="qud_res")
+    with col2:
+        nm = st.number_input("Mise (€)", value=float(sr["Misé"]) if pd.notna(sr["Misé"]) else 5.0,
+                             min_value=0.01, step=0.5, key="qud_mise")
+    with col3:
+        st.markdown("<br>", unsafe_allow_html=True)
+        if st.button("💾 Sauvegarder", type="primary", use_container_width=True, key="qud_save"):
+            update_result(sheet_name, sr["Événement"], sr["Pari"], sr["Date"],
+                          "✅" if "Gagné" in nr else "❌", nm)
+            st.toast("Résultat enregistré !", icon="💾")
+            refresh()
+
+
+def _ensure_datetime_fn(df):
+    if "Date" in df.columns and not pd.api.types.is_datetime64_any_dtype(df["Date"]):
+        df["Date"] = pd.to_datetime(df["Date"], dayfirst=True, errors="coerce")
+    return df
+
+
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
     local_ip  = get_local_ip()
@@ -205,8 +249,12 @@ with st.sidebar:
 
     page = st.radio("Navigation", [
         "🏠 Dashboard", "📋 Catalogue général", "👤 Mes paris",
-        "📈 Analyses", "💡 Recommandations",
+        "⏳ En attente", "📈 Analyses", "💡 Recommandations",
     ], label_visibility="collapsed")
+
+    if st.button("⚡ Résultat rapide", use_container_width=True, type="primary",
+                 help="Valider un pari en attente sans changer de page"):
+        quick_update_dialog()
 
     st.divider()
 
@@ -258,8 +306,9 @@ with st.sidebar:
 
 
 # ── Load data ─────────────────────────────────────────────────────────────────
-df_gen      = get_data(SHEET_GENERAL)
-df_me       = get_data(SHEET_PERSO)
+_dv    = st.session_state.get("_dv", 0)
+df_gen = get_data(SHEET_GENERAL, version=_dv)
+df_me  = get_data(SHEET_PERSO,   version=_dv)
 
 # Ensure Date columns are always datetime (safety net for varied Google Sheets formats)
 def _ensure_datetime(df):
@@ -276,13 +325,472 @@ df_analysis = df_gen if target == "Catalogue général" else df_me
 # ── Sidebar data summary (injected after data load) ───────────────────────────
 _sg = compute_stats(df_gen)
 _sm = compute_stats(df_me)
+_pend_total = _sg["pending"] + _sm["pending"]
+_pend_html  = (
+    f"<br>⏳ <b style='color:#fbbf24'>{_pend_total} en attente</b> de résultat"
+    if _pend_total > 0 else ""
+)
 st.sidebar.markdown(
     f"<div style='font-size:.75rem;color:#64748b;line-height:1.8'>"
     f"📋 <b>Catalogue</b> : {len(df_gen)} paris · {_sg['total']} terminés<br>"
     f"👤 <b>Mes paris</b>  : {len(df_me)} paris · {_sm['total']} terminés"
-    f"</div>",
+    f"{_pend_html}</div>",
     unsafe_allow_html=True,
 )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# FRAGMENT : ANALYSES
+# ══════════════════════════════════════════════════════════════════════════════
+@st.fragment
+def render_analyses(df_gen, df_me, bankroll):
+    col_src, col_exp_btn = st.columns([4, 2])
+    with col_src:
+        src = st.radio(
+            "Source de données",
+            ["📋 Catalogue général", "👤 Mes paris (Maxime)"],
+            horizontal=True, key="analyses_source",
+            help="Le catalogue contient toutes les cotes disponibles. 'Mes paris' = uniquement tes sélections avec tes mises réelles.",
+        )
+    df_a    = df_gen if "Catalogue" in src else df_me
+    played  = df_a[df_a["Validé ?"].isin(["✅","❌"])]
+    src_lbl = "Catalogue général" if "Catalogue" in src else "Mes paris"
+    with col_exp_btn:
+        st.markdown("<br>", unsafe_allow_html=True)
+        export_button(played, f"analyse_{src_lbl.replace(' ','_')}.csv", "📥 Exporter CSV")
+
+    if len(played) < 3:
+        st.warning("Pas assez de données. Valide au moins 3 paris pour voir les analyses.")
+        return
+
+    stats_a   = compute_stats(df_a)
+    streaks_a = streak_stats(df_a)
+    st.divider()
+    kc1,kc2,kc3,kc4,kc5 = st.columns(5)
+    with kc1: st.markdown(kpi("Paris joués", stats_a["total"], "blue",
+        f"{stats_a['wins']}W / {stats_a['losses']}L",
+        "Nombre total de paris terminés dans cette source."), unsafe_allow_html=True)
+    with kc2:
+        wr_a = stats_a["win_rate"]*100
+        st.markdown(kpi("Win Rate", f"{wr_a:.1f}%", "green" if wr_a>=40 else "red",
+        help_text="Pourcentage de paris gagnés parmi les paris terminés."), unsafe_allow_html=True)
+    with kc3:
+        b_a = stats_a["benefice"]
+        st.markdown(kpi("Bénéfice", f"{b_a:+.2f} €", "green" if b_a>=0 else "red",
+        f"ROI {stats_a['roi']*100:.1f}%",
+        "Gains nets totaux. ROI = Bénéfice / Mises totales × 100."), unsafe_allow_html=True)
+    with kc4:
+        ev_a = stats_a["ev_moyen"]
+        st.markdown(kpi("EV moyen", f"{ev_a:+.3f}", "green" if ev_a>0 else "red",
+        help_text="Espérance de valeur : p × cote - 1. Positif = avantage mathématique."), unsafe_allow_html=True)
+    with kc5:
+        sc_a = "green" if streaks_a["current_type"]=="✅" else "red"
+        st.markdown(kpi("Série en cours", f"{streaks_a['current_type']} ×{streaks_a['current_val']}", sc_a,
+        f"Record: {streaks_a['best_win']}W / {streaks_a['best_loss']}L",
+        "Série de résultats identiques consécutifs."), unsafe_allow_html=True)
+
+    st.divider()
+
+    section_header("Courbe de bénéfice cumulé",
+        "Évolution de ton bénéfice au fil des paris. Chaque point = un pari terminé. "
+        "Les marqueurs verts = victoires, les croix rouges = défaites. "
+        "Une courbe qui monte régulièrement indique une stratégie solide.")
+    col_curve, col_donut = st.columns([3, 2])
+    with col_curve:
+        pl_sorted = played.reset_index(drop=True).copy()
+        pl_sorted["N"]     = range(1, len(pl_sorted)+1)
+        pl_sorted["Cumul"] = pl_sorted["Gain réel"].cumsum()
+        fig_curve = go.Figure()
+        fig_curve.add_trace(go.Scatter(x=pl_sorted["N"], y=pl_sorted["Cumul"],
+            mode="lines", line=dict(color="#818cf8", width=2.5),
+            fill="tozeroy", fillcolor="rgba(129,140,248,.1)",
+            hovertemplate="Pari #%{x}<br><b>%{y:+.2f} €</b><extra></extra>", name="Bénéfice"))
+        w2 = pl_sorted[pl_sorted["Validé ?"]=="✅"]
+        l2 = pl_sorted[pl_sorted["Validé ?"]=="❌"]
+        fig_curve.add_trace(go.Scatter(x=w2["N"], y=w2["Cumul"], mode="markers",
+            marker=dict(color="#4ade80", size=6), name="Gagné",
+            hovertemplate="%{y:+.2f} €<extra>✅</extra>"))
+        fig_curve.add_trace(go.Scatter(x=l2["N"], y=l2["Cumul"], mode="markers",
+            marker=dict(color="#f87171", size=6, symbol="x"), name="Perdu",
+            hovertemplate="%{y:+.2f} €<extra>❌</extra>"))
+        fig_curve.add_hline(y=0, line_dash="dash", line_color="rgba(255,255,255,.2)")
+        fig_curve.update_layout(**_chart(height=280, showlegend=True,
+                                          legend=dict(orientation="h", y=1.15)))
+        st.plotly_chart(fig_curve, use_container_width=True)
+    with col_donut:
+        fig_dn = go.Figure(go.Pie(
+            labels=["Gagnés","Perdus","En attente"],
+            values=[stats_a["wins"], stats_a["losses"], stats_a["pending"]],
+            hole=0.65, marker=dict(colors=["#4ade80","#f87171","#fbbf24"]),
+            textinfo="percent",
+            hovertemplate="<b>%{label}</b><br>%{value} paris (%{percent})<extra></extra>"))
+        fig_dn.add_annotation(text=f"<b>{wr_a:.0f}%</b><br>win rate",
+            x=0.5, y=0.5, font=dict(size=16, color="#e2e8f0"), showarrow=False)
+        fig_dn.update_layout(**_chart(height=280, showlegend=True,
+                                       legend=dict(orientation="h", y=-0.1)))
+        st.plotly_chart(fig_dn, use_container_width=True)
+
+    st.divider()
+
+    rw_window = 5
+    rw_df = rolling_win_rate(df_a, window=rw_window)
+    if not rw_df.empty:
+        col_roll = f"Win Rate roulant ({rw_window} paris) %"
+        section_header(f"Win Rate roulant ({rw_window} paris)",
+            f"Chaque point = win rate calculé sur les **{rw_window} derniers paris**. "
+            "Permet de voir si tu es en forme ou en difficulté en ce moment. "
+            "**Ligne pointillée** = win rate global depuis le début. "
+            "Une courbe qui monte = amélioration de la sélection.")
+        fig_rw = go.Figure()
+        fig_rw.add_trace(go.Scatter(x=rw_df["N"], y=rw_df[col_roll],
+            mode="lines+markers", name=f"Win Rate roulant ({rw_window})",
+            line=dict(color="#818cf8", width=2.5), marker=dict(size=5),
+            hovertemplate="Pari #%{x}<br>Win Rate roulant : <b>%{y:.1f}%</b><extra></extra>"))
+        fig_rw.add_trace(go.Scatter(x=rw_df["N"], y=rw_df["Win Rate global %"],
+            mode="lines", name="Win Rate global",
+            line=dict(color="#fbbf24", width=1.5, dash="dot"),
+            hovertemplate="Pari #%{x}<br>Win Rate global : %{y:.1f}%<extra></extra>"))
+        fig_rw.add_hline(y=50, line_dash="dash", line_color="rgba(255,255,255,.15)",
+                          annotation_text="50%", annotation_font_color="#64748b")
+        fig_rw.update_layout(**_chart(height=260, showlegend=True,
+                                       legend=dict(orientation="h", y=1.15),
+                                       yaxis=dict(ticksuffix="%", range=[0, 105])))
+        st.plotly_chart(fig_rw, use_container_width=True)
+        st.divider()
+
+    section_header("P&L mensuel",
+        "**Barres** = bénéfice net du mois (vert = profitable, rouge = en perte). "
+        "**Ligne cyan** = Win Rate du mois (axe droit). "
+        "Permet de voir si tes performances s'améliorent avec le temps.")
+    if not played["Date"].isna().all():
+        monthly = played.copy()
+        monthly["Mois"] = monthly["Date"].dt.to_period("M").astype(str)
+        monthly_pnl = monthly.groupby("Mois").apply(
+            lambda g: pd.Series({
+                "Bénéfice": round(float(g["Gain réel"].sum()), 2),
+                "Paris": len(g),
+                "Win Rate %": round((g["Validé ?"]=="✅").sum() / len(g) * 100, 1),
+            })
+        ).reset_index()
+        if not monthly_pnl.empty:
+            fig_monthly = go.Figure()
+            fig_monthly.add_trace(go.Bar(
+                x=monthly_pnl["Mois"], y=monthly_pnl["Bénéfice"],
+                name="Bénéfice (€)",
+                marker_color=monthly_pnl["Bénéfice"].apply(lambda x: "#4ade80" if x >= 0 else "#f87171"),
+                text=monthly_pnl["Bénéfice"].apply(lambda x: f"{x:+.2f} €"),
+                textposition="outside",
+                hovertemplate="<b>%{x}</b><br>Bénéfice : %{y:+.2f} €<br>%{customdata[0]} paris<extra></extra>",
+                customdata=monthly_pnl[["Paris"]].values,
+            ))
+            fig_monthly.add_trace(go.Scatter(
+                x=monthly_pnl["Mois"], y=monthly_pnl["Win Rate %"],
+                name="Win Rate %", yaxis="y2", mode="lines+markers",
+                line=dict(color="#22d3ee", width=2), marker=dict(size=7),
+                hovertemplate="%{x}<br>Win Rate : %{y:.0f}%<extra></extra>"))
+            fig_monthly.add_hline(y=0, line_dash="dash", line_color="rgba(255,255,255,.2)")
+            fig_monthly.update_layout(**_chart(height=280, title="Bénéfice net et Win Rate par mois",
+                yaxis2=dict(overlaying="y", side="right", title="Win Rate %",
+                            color="#22d3ee", showgrid=False, ticksuffix="%", range=[0, 105]),
+                legend=dict(orientation="h", y=1.15)))
+            st.plotly_chart(fig_monthly, use_container_width=True)
+
+    st.divider()
+
+    section_header("Performance par sport",
+        "**Win Rate** = % de paris gagnés. **ROI** = rentabilité nette (bénéfice / total misé × 100). "
+        "**Boost moy.** = augmentation moyenne de cote offerte par le bookmaker sur ce sport.")
+    sp_df = stats_by_sport(df_a)
+    if not sp_df.empty:
+        ca, cb = st.columns([5, 4])
+        with ca:
+            dsp = sp_df[["Sport","Paris","Gagnés","Win Rate %","Bénéfice (€)","ROI %","Cote moy.","Boost moy. %"]].copy()
+            dsp["Win Rate %"]   = dsp["Win Rate %"].apply(lambda x: f"{x:.0f}%")
+            dsp["ROI %"]        = dsp["ROI %"].apply(lambda x: f"{x:+.1f}%")
+            dsp["Boost moy. %"] = dsp["Boost moy. %"].apply(lambda x: f"+{x:.1f}%")
+            st.dataframe(dsp, hide_index=True, use_container_width=True)
+        with cb:
+            fig_sp = px.bar(sp_df, x="Sport", y="ROI %", color="ROI %",
+                color_continuous_scale=["#f87171","#fbbf24","#4ade80"],
+                text=sp_df["ROI %"].apply(lambda x: f"{x:+.1f}%"), title="ROI par sport")
+            fig_sp.add_hline(y=0, line_dash="dash", line_color="rgba(255,255,255,.3)")
+            fig_sp.update_traces(textposition="outside")
+            fig_sp.update_layout(**_chart(height=300, coloraxis_showscale=False))
+            st.plotly_chart(fig_sp, use_container_width=True)
+
+    st.divider()
+
+    section_header("Heatmap Sport × Jour de la semaine",
+        "Chaque cellule = win rate (%) pour ce sport ce jour-là. "
+        "**Vert** = bon win rate, **Rouge** = mauvais, **Gris** = aucun pari ce jour pour ce sport.")
+    hm = heatmap_sport_day(df_a)
+    if not hm.empty:
+        fig_hm = go.Figure(go.Heatmap(
+            z=hm.values, x=hm.columns.tolist(), y=hm.index.tolist(),
+            colorscale=[[0,"#f87171"],[0.5,"#fbbf24"],[1,"#4ade80"]],
+            zmin=0, zmax=100,
+            text=[[f"{v:.0f}%" if not pd.isna(v) else "" for v in row] for row in hm.values],
+            texttemplate="%{text}",
+            hovertemplate="<b>%{y}</b> — %{x}<br>Win Rate : %{z:.0f}%<extra></extra>",
+            colorbar=dict(title="Win Rate %", ticksuffix="%"),
+        ))
+        fig_hm.update_layout(**_chart(height=max(250, len(hm)*50+60), title="Win Rate % par sport et jour"))
+        st.plotly_chart(fig_hm, use_container_width=True)
+    else:
+        st.info("Pas assez de données avec des dates pour afficher la heatmap.")
+
+    st.divider()
+
+    col_t, col_d = st.columns(2)
+    with col_t:
+        section_header("Par catégorie de pari",
+            "**Buteur/Marqueur** = pari sur un joueur qui marque. "
+            "**Over/Under** = pari sur le total de points/buts. "
+            "**Performance combinée** = pari impliquant plusieurs conditions ('et'). "
+            "Identifie les types de paris où tu excelles vraiment.")
+        ty = stats_by_type(df_a)
+        if not ty.empty:
+            fig_ty = px.bar(ty, x="Catégorie", y="ROI %", color="Win Rate %",
+                color_continuous_scale=["#f87171","#fbbf24","#4ade80"],
+                text=ty["ROI %"].apply(lambda x: f"{x:+.1f}%"),
+                title="ROI par catégorie",
+                hover_data={"Paris": True, "Gagnés": True, "Bénéfice (€)": True})
+            fig_ty.add_hline(y=0, line_dash="dash", line_color="rgba(255,255,255,.2)")
+            fig_ty.update_traces(textposition="outside")
+            fig_ty.update_layout(**_chart(height=300, coloraxis_showscale=False,
+                                           xaxis=dict(tickangle=-25)))
+            st.plotly_chart(fig_ty, use_container_width=True)
+            dty = ty[["Catégorie","Paris","Gagnés","Win Rate %","ROI %","Bénéfice (€)"]].copy()
+            dty["Win Rate %"] = dty["Win Rate %"].apply(lambda x: f"{x:.0f}%")
+            dty["ROI %"]      = dty["ROI %"].apply(lambda x: f"{x:+.1f}%")
+            st.dataframe(dty, hide_index=True, use_container_width=True)
+
+    with col_d:
+        section_header("Par jour de la semaine",
+            "Win rate et ROI selon le jour où tu as parié. "
+            "Certains jours sont meilleurs car les compétitions diffèrent. "
+            "La couleur = ROI, la hauteur = win rate.")
+        day_df = stats_by_day(df_a)
+        if not day_df.empty:
+            fig_day = px.bar(day_df, x="Jour", y="Win Rate %", color="ROI %",
+                color_continuous_scale=["#f87171","#fbbf24","#4ade80"],
+                text=day_df["Win Rate %"].apply(lambda x: f"{x:.0f}%"),
+                title="Win rate & ROI par jour",
+                hover_data={"Paris": True, "Bénéfice (€)": True})
+            fig_day.update_traces(textposition="outside")
+            fig_day.update_layout(**_chart(height=300, coloraxis_showscale=False))
+            st.plotly_chart(fig_day, use_container_width=True)
+            dday = day_df[["Jour","Paris","Win Rate %","ROI %","Bénéfice (€)"]].copy()
+            dday["Win Rate %"] = dday["Win Rate %"].apply(lambda x: f"{x:.0f}%")
+            dday["ROI %"]      = dday["ROI %"].apply(lambda x: f"{x:+.1f}%")
+            st.dataframe(dday, hide_index=True, use_container_width=True)
+
+    st.divider()
+
+    section_header("Par créneau horaire",
+        "**Matin** = 6h-12h, **Après-midi** = 12h-18h, **Soir** = 18h-23h, **Nuit** = 23h-6h. "
+        "Montre si tu analyses mieux à certaines heures, ou si les compétitions du soir sont plus prévisibles.")
+    hr_df = stats_by_hour(df_a)
+    if not hr_df.empty:
+        col_h1, col_h2 = st.columns([3, 2])
+        with col_h1:
+            dhr = hr_df[["Créneau","Paris","Win Rate %","ROI %","Bénéfice (€)"]].copy()
+            dhr["Win Rate %"] = dhr["Win Rate %"].apply(lambda x: f"{x:.0f}%")
+            dhr["ROI %"]      = dhr["ROI %"].apply(lambda x: f"{x:+.1f}%")
+            st.dataframe(dhr, hide_index=True, use_container_width=True)
+        with col_h2:
+            fig_hr = px.bar(hr_df, x="Créneau", y="Win Rate %", color="ROI %",
+                color_continuous_scale=["#f87171","#fbbf24","#4ade80"],
+                text=hr_df["Win Rate %"].apply(lambda x: f"{x:.0f}%"),
+                title="Win rate par créneau",
+                hover_data={"Paris": True, "Bénéfice (€)": True})
+            fig_hr.update_traces(textposition="outside")
+            fig_hr.update_layout(**_chart(height=260, coloraxis_showscale=False))
+            st.plotly_chart(fig_hr, use_container_width=True)
+    else:
+        st.info("Heures non renseignées pour suffisamment de paris.")
+
+    st.divider()
+
+    col_b, col_o = st.columns(2)
+    with col_b:
+        section_header("Efficacité par tranche de boost",
+            "Groupe tes paris selon l'ampleur du boost. "
+            "Un gros boost ne signifie pas un pari plus facile. "
+            "Cette analyse révèle si les gros boosts sont rentables ou du marketing.")
+        boost_df = boost_efficiency(df_a)
+        if not boost_df.empty:
+            boost_df["label"] = boost_df.apply(
+                lambda r: f"{r['Win Rate %']:.0f}%\n({int(r['Paris'])} paris)", axis=1)
+            fig_boost = px.bar(boost_df, x="Tranche boost", y="Win Rate %", color="ROI %",
+                color_continuous_scale=["#f87171","#fbbf24","#4ade80"],
+                text="label", title="Win rate par tranche de boost",
+                hover_data={"Paris": True, "ROI %": ":.1f", "Bénéfice (€)": True, "label": False})
+            fig_boost.update_traces(textposition="outside")
+            fig_boost.update_layout(**_chart(height=300, coloraxis_showscale=False))
+            st.plotly_chart(fig_boost, use_container_width=True)
+
+    with col_o:
+        section_header("Performance par plage de cote boostée",
+            "**Barre** = win rate (axe gauche). **Ligne cyan** = ROI (axe droit). "
+            "Cherche les plages avec les deux indicateurs élevés.")
+        odds_df = stats_by_odds_range(df_a)
+        if not odds_df.empty:
+            fig_odds = go.Figure()
+            fig_odds.add_trace(go.Bar(x=odds_df["Tranche cote"], y=odds_df["Win Rate %"],
+                name="Win Rate %", marker_color="#818cf8",
+                text=odds_df["Win Rate %"].apply(lambda x: f"{x:.0f}%"), textposition="outside",
+                hovertemplate="%{x}<br>Win Rate : %{y:.0f}%<br>%{customdata} paris<extra></extra>",
+                customdata=odds_df["Paris"]))
+            fig_odds.add_trace(go.Scatter(x=odds_df["Tranche cote"], y=odds_df["ROI %"],
+                name="ROI %", yaxis="y2", mode="lines+markers",
+                line=dict(color="#22d3ee", width=2), marker=dict(size=8),
+                hovertemplate="%{x}<br>ROI : %{y:.1f}%<extra></extra>"))
+            fig_odds.update_layout(**_chart(height=300, title="Win rate & ROI par plage de cote",
+                yaxis2=dict(overlaying="y", side="right", title="ROI %", color="#22d3ee", showgrid=False),
+                legend=dict(orientation="h", y=1.15)))
+            st.plotly_chart(fig_odds, use_container_width=True)
+
+    st.divider()
+
+    col_sc, col_hist = st.columns([3, 2])
+    with col_sc:
+        section_header("Cote boostée vs Gain réel",
+            "Chaque bulle = un pari. **Taille** = mise. **Vert** = gagné, **Rouge** = perdu.")
+        played2 = played.copy()
+        played2["Résultat"] = played2["Validé ?"].map({"✅":"Gagné","❌":"Perdu"})
+        fig_sc = px.scatter(played2, x="Cote boostée", y="Gain réel", color="Résultat",
+            color_discrete_map={"Gagné":"#4ade80","Perdu":"#f87171"},
+            size="Misé", size_max=18,
+            hover_data=["Événement","Pari","Sport","Date"],
+            title="Chaque bulle = un pari (taille = mise)")
+        fig_sc.add_hline(y=0, line_dash="dash", line_color="rgba(255,255,255,.2)")
+        fig_sc.update_layout(**_chart(height=340))
+        st.plotly_chart(fig_sc, use_container_width=True)
+
+    with col_hist:
+        section_header("Distribution des mises",
+            "Histogramme de la répartition de tes mises. "
+            "Une gestion de bankroll saine implique des mises régulières et limitées.")
+        if "Misé" in played.columns and played["Misé"].notna().any():
+            mise_data = played["Misé"].dropna()
+            fig_hist = go.Figure(go.Histogram(
+                x=mise_data, nbinsx=min(15, len(mise_data)),
+                marker_color="#818cf8",
+                marker_line=dict(color="#1e1b4b", width=1),
+                hovertemplate="Mise %{x:.1f} € : <b>%{y} paris</b><extra></extra>",
+            ))
+            mean_mise = mise_data.mean()
+            fig_hist.add_vline(x=mean_mise, line_dash="dash", line_color="#fbbf24",
+                               annotation_text=f"Moy. {mean_mise:.1f} €",
+                               annotation_font_color="#fbbf24")
+            fig_hist.update_layout(**_chart(height=340, title="Répartition des mises (€)",
+                                            xaxis_title="Mise (€)", yaxis_title="Nombre de paris"))
+            st.plotly_chart(fig_hist, use_container_width=True)
+            m1, m2, m3 = st.columns(3)
+            with m1: st.metric("Mise min",  f"{mise_data.min():.2f} €")
+            with m2: st.metric("Mise moy.", f"{mean_mise:.2f} €")
+            with m3: st.metric("Mise max",  f"{mise_data.max():.2f} €")
+
+    st.divider()
+
+    section_header("Palmarès — Meilleurs & Pires paris",
+        "**Top 5 gains** = tes paris les plus rentables. "
+        "**Pires 5** = les paris qui t'ont le plus coûté.")
+    col_top, col_flop = st.columns(2)
+    with col_top:
+        st.markdown('<p style="color:#4ade80;font-weight:600;margin-bottom:6px">🏆 Top 5 — Meilleurs gains</p>', unsafe_allow_html=True)
+        top5 = played.nlargest(5, "Gain réel")[["Date","Sport","Événement","Pari","Cote boostée","Misé","Gain réel","Validé ?"]].copy()
+        top5["Date"] = top5["Date"].dt.strftime("%d/%m").fillna("")
+        top5["Pari"] = top5["Pari"].apply(lambda x: str(x)[:40])
+        st.dataframe(top5, hide_index=True, use_container_width=True,
+            column_config={"Cote boostée": st.column_config.NumberColumn(format="%.2f"),
+                           "Misé": st.column_config.NumberColumn(format="%.2f €"),
+                           "Gain réel": st.column_config.NumberColumn(format="%.2f €")})
+    with col_flop:
+        st.markdown('<p style="color:#f87171;font-weight:600;margin-bottom:6px">💔 Pires 5 — Plus grosses pertes</p>', unsafe_allow_html=True)
+        flop5 = played.nsmallest(5, "Gain réel")[["Date","Sport","Événement","Pari","Cote boostée","Misé","Gain réel","Validé ?"]].copy()
+        flop5["Date"] = flop5["Date"].dt.strftime("%d/%m").fillna("")
+        flop5["Pari"] = flop5["Pari"].apply(lambda x: str(x)[:40])
+        st.dataframe(flop5, hide_index=True, use_container_width=True,
+            column_config={"Cote boostée": st.column_config.NumberColumn(format="%.2f"),
+                           "Misé": st.column_config.NumberColumn(format="%.2f €"),
+                           "Gain réel": st.column_config.NumberColumn(format="%.2f €")})
+
+    st.divider()
+
+    section_header("Comparatif Catalogue général vs Mes paris",
+        "Compare tes résultats personnels avec l'ensemble du catalogue. "
+        "Si ton win rate personnel est supérieur au catalogue, tu as un bon sens de la sélection.")
+    stats_cat   = compute_stats(df_gen)
+    stats_perso = compute_stats(df_me)
+    comp_data = {
+        "Source":      ["Catalogue général", "Mes paris"],
+        "Paris":       [stats_cat["total"], stats_perso["total"]],
+        "Win Rate %":  [round(stats_cat["win_rate"]*100,1), round(stats_perso["win_rate"]*100,1)],
+        "ROI %":       [round(stats_cat["roi"]*100,1), round(stats_perso["roi"]*100,1)],
+        "Bénéfice (€)":[stats_cat["benefice"], stats_perso["benefice"]],
+        "EV moyen":    [stats_cat["ev_moyen"], stats_perso["ev_moyen"]],
+    }
+    comp_df = pd.DataFrame(comp_data)
+    cc1, cc2, cc3 = st.columns(3)
+    for col, (metric, unit) in zip([cc1, cc2, cc3],
+            [("Win Rate %","%"), ("ROI %","%"), ("Bénéfice (€)","€")]):
+        with col:
+            v_cat   = comp_df.loc[comp_df["Source"]=="Catalogue général", metric].values[0]
+            v_perso = comp_df.loc[comp_df["Source"]=="Mes paris", metric].values[0]
+            delta   = v_perso - v_cat
+            st.metric(f"📋 {metric}", f"{v_cat:.1f}{unit}")
+            st.metric(f"👤 {metric}", f"{v_perso:.1f}{unit}", delta=f"{delta:+.1f}{unit}",
+                       help="Delta = Mes paris − Catalogue. Positif = tu sélectionnes mieux.")
+    fig_comp = go.Figure()
+    for _, row in comp_df.iterrows():
+        color = "#818cf8" if "Catalogue" in row["Source"] else "#22d3ee"
+        fig_comp.add_trace(go.Bar(
+            name=row["Source"], x=["Win Rate %","ROI %"],
+            y=[row["Win Rate %"], row["ROI %"]], marker_color=color,
+            text=[f"{row['Win Rate %']:.1f}%", f"{row['ROI %']:+.1f}%"],
+            textposition="outside"))
+    fig_comp.add_hline(y=0, line_dash="dash", line_color="rgba(255,255,255,.2)")
+    fig_comp.update_layout(**_chart(height=280, barmode="group",
+                                     title="Catalogue vs Mes paris",
+                                     legend=dict(orientation="h", y=1.12)))
+    st.plotly_chart(fig_comp, use_container_width=True)
+
+    st.divider()
+
+    section_header("Simulation : Kelly vs mise réelle",
+        "Simule ce qu'aurait été ta bankroll en appliquant le **critère de Kelly fractionnel** "
+        "depuis le début. **Kelly/2** = version conservatrice qui limite le risque de ruine. "
+        f"Bankroll initiale simulée : {bankroll:.0f} €.")
+    sim_df = simulate_kelly_bankroll(df_a, initial_bankroll=bankroll)
+    if not sim_df.empty:
+        fig_sim = go.Figure()
+        fig_sim.add_trace(go.Scatter(x=sim_df["N"], y=sim_df["Bankroll réelle"],
+            mode="lines", line=dict(color="#22d3ee", width=2), name="Mise réelle",
+            hovertemplate="Pari #%{x}<br>Bankroll réelle : %{y:.2f} €<extra></extra>"))
+        fig_sim.add_trace(go.Scatter(x=sim_df["N"], y=sim_df["Bankroll Kelly"],
+            mode="lines", line=dict(color="#fbbf24", width=2, dash="dash"), name="Kelly /2 (simulé)",
+            hovertemplate="Pari #%{x}<br>Kelly simulé : %{y:.2f} €<extra></extra>"))
+        fig_sim.add_hline(y=bankroll, line_dash="dot", line_color="rgba(255,255,255,.2)",
+                           annotation_text=f"Bankroll initiale ({bankroll:.0f}€)")
+        fig_sim.update_layout(**_chart(height=300, title="Évolution de bankroll : Réel vs Kelly",
+                                        legend=dict(orientation="h", y=1.12)))
+        st.plotly_chart(fig_sim, use_container_width=True)
+
+    section_header("Critère de Kelly par sport",
+        "**Kelly %** = fraction théorique optimale de la bankroll à miser. "
+        "**Kelly /2 %** = version fractionnelle recommandée (réduit le risque de ruine). "
+        f"**Mise suggérée** = montant pour une bankroll de {bankroll:.0f} €.")
+    kelly_df = kelly_by_sport(df_a, bankroll=bankroll)
+    if not kelly_df.empty:
+        st.caption(f"Bankroll : **{bankroll:.0f} €** — modifiable dans la sidebar.")
+        st.dataframe(kelly_df, hide_index=True, use_container_width=True,
+            column_config={
+                f"Mise suggérée ({bankroll:.0f}€)": st.column_config.NumberColumn(format="%.2f €"),
+            })
+    else:
+        st.info("Minimum 3 paris par sport requis pour calculer Kelly.")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -509,46 +1017,50 @@ elif page == "📋 Catalogue général":
     sub = st.tabs(["📄 Voir / Mettre à jour", "➕ Ajouter un pari"])
 
     with sub[0]:
-        cf1,cf2,cf3,cf4 = st.columns([2,2,2,1])
-        with cf1:
-            sf = st.selectbox("Sport", ["Tous"]+sorted(df_gen["Sport"].dropna().unique().tolist()),
-                               key="g_sport", help="Filtre les paris par sport.")
-        with cf2:
-            dates = sorted(df_gen["Date"].dropna().unique().tolist(), reverse=True)
-            dl = ["Toutes"]+[pd.Timestamp(d).strftime("%d/%m/%Y") for d in dates]
-            df_f = st.selectbox("Date", dl, key="g_date",
-                                 help="Filtre par date. Les dates les plus récentes sont en premier.")
-        with cf3:
-            sf2 = st.selectbox("Statut", ["Tous","✅ Gagné","❌ Perdu","⏳ En attente"],
-                                key="g_status", help="Filtre par résultat du pari.")
-        with cf4:
-            st.markdown("<br>", unsafe_allow_html=True)
-            if st.button("🔄", help="Recharger les données depuis le fichier Excel."):
-                refresh()
+        @st.fragment
+        def catalogue_table(df_src):
+            cf1,cf2,cf3,cf4 = st.columns([2,2,2,1])
+            with cf1:
+                sf = st.selectbox("Sport", ["Tous"]+sorted(df_src["Sport"].dropna().unique().tolist()),
+                                   key="g_sport", help="Filtre les paris par sport.")
+            with cf2:
+                dates = sorted(df_src["Date"].dropna().unique().tolist(), reverse=True)
+                dl = ["Toutes"]+[pd.Timestamp(d).strftime("%d/%m/%Y") for d in dates]
+                df_f = st.selectbox("Date", dl, key="g_date",
+                                     help="Filtre par date. Les dates les plus récentes sont en premier.")
+            with cf3:
+                sf2 = st.selectbox("Statut", ["Tous","✅ Gagné","❌ Perdu","⏳ En attente"],
+                                    key="g_status", help="Filtre par résultat du pari.")
+            with cf4:
+                st.markdown("<br>", unsafe_allow_html=True)
+                if st.button("🔄", help="Recharger les données depuis le fichier Excel."):
+                    refresh()
 
-        dv = df_gen.copy()
-        if sf2 == "✅ Gagné":        dv = dv[dv["Validé ?"] == "✅"]
-        elif sf2 == "❌ Perdu":      dv = dv[dv["Validé ?"] == "❌"]
-        elif sf2 == "⏳ En attente": dv = dv[dv["Validé ?"] == "?"]
-        if sf != "Tous":             dv = dv[dv["Sport"] == sf]
-        if df_f != "Toutes":
-            sd = pd.to_datetime(df_f, format="%d/%m/%Y")
-            dv = dv[dv["Date"].dt.date == sd.date()]
+            dv = df_src.copy()
+            if sf2 == "✅ Gagné":        dv = dv[dv["Validé ?"] == "✅"]
+            elif sf2 == "❌ Perdu":      dv = dv[dv["Validé ?"] == "❌"]
+            elif sf2 == "⏳ En attente": dv = dv[dv["Validé ?"] == "?"]
+            if sf != "Tous":             dv = dv[dv["Sport"] == sf]
+            if df_f != "Toutes":
+                sd = pd.to_datetime(df_f, format="%d/%m/%Y")
+                dv = dv[dv["Date"].dt.date == sd.date()]
 
-        colinfo, colexp = st.columns([8,2])
-        with colinfo: st.caption(f"{len(dv)} paris affichés")
-        with colexp:  export_button(dv, "catalogue.csv", "📥 CSV")
+            colinfo, colexp = st.columns([8,2])
+            with colinfo: st.caption(f"{len(dv)} paris affichés")
+            with colexp:  export_button(dv, "catalogue.csv", "📥 CSV")
 
-        disp = dv[["Date","Heure","Sport","Événement","Pari","Cote initiale","Cote boostée","Validé ?","Misé","Gain réel"]].copy()
-        disp = disp.sort_values("Date", ascending=False)
-        disp["Date"] = disp["Date"].dt.strftime("%d/%m").fillna("")
-        st.dataframe(disp, hide_index=True, use_container_width=True,
-            column_config={
-                "Cote initiale": st.column_config.NumberColumn(format="%.2f"),
-                "Cote boostée":  st.column_config.NumberColumn(format="%.2f"),
-                "Misé":          st.column_config.NumberColumn(format="%.2f €"),
-                "Gain réel":     st.column_config.NumberColumn(format="%.2f €"),
-            })
+            disp = dv[["Date","Heure","Sport","Événement","Pari","Cote initiale","Cote boostée","Validé ?","Misé","Gain réel"]].copy()
+            disp = disp.sort_values("Date", ascending=False)
+            disp["Date"] = disp["Date"].dt.strftime("%d/%m").fillna("")
+            st.dataframe(disp, hide_index=True, use_container_width=True,
+                column_config={
+                    "Cote initiale": st.column_config.NumberColumn(format="%.2f"),
+                    "Cote boostée":  st.column_config.NumberColumn(format="%.2f"),
+                    "Misé":          st.column_config.NumberColumn(format="%.2f €"),
+                    "Gain réel":     st.column_config.NumberColumn(format="%.2f €"),
+                })
+
+        catalogue_table(df_gen)
 
         st.divider()
         st.markdown("#### ✏️ Mettre à jour un résultat",
@@ -599,8 +1111,8 @@ elif page == "📋 Catalogue général":
                                        help="Cote d'origine avant le boost du bookmaker.")
                 fcb = st.number_input("Cote boostée",   min_value=1.01, step=0.05, value=2.5,
                                        help="Cote après boost. Doit être supérieure à la cote initiale.")
-                fm  = st.number_input("Mise suggérée (€)", min_value=0.5, step=0.5, value=5.0,
-                                       help="Mise recommandée pour ce pari dans le catalogue général.")
+                fm  = 5.0
+                st.markdown("**Mise fixe : 5 €**", help="Le catalogue simule toujours une mise de 5 € par pari pour comparer les cotes sur une base identique.")
                 fr  = st.selectbox("Résultat", ["?","✅","❌"],
                                     help="? = en attente. Tu pourras mettre à jour plus tard.")
             if st.form_submit_button("➕ Ajouter au catalogue", use_container_width=True):
@@ -711,11 +1223,15 @@ elif page == "👤 Mes paris":
                     bp = (sr["Cote boostée"]-sr["Cote initiale"])/sr["Cote initiale"]*100
                     st.caption(f"Cote : {sr['Cote initiale']} → **{sr['Cote boostée']}** (+{bp:.1f}%)")
                 with cm2:
-                    mp = st.number_input("Ma mise réelle (€)",min_value=0.1,step=0.5,value=5.0,
+                    mp = st.number_input("Ma mise réelle (€)", min_value=0.1, step=0.5,
+                                          value=5.0,
                                           key="me_mg",
-                                          help="La mise que tu as effectivement jouée sur ce pari.")
-                    rp = st.selectbox("Résultat",["?","✅","❌"],key="me_rg",
-                                       help="? si le résultat n'est pas encore connu.")
+                                          help="Entre ta mise réelle sur ce pari (différente de la simulation catalogue à 5 €).")
+                    _opts_res = ["?","✅","❌"]
+                    _default_res = str(sr.get("Validé ?","?"))
+                    _res_idx = _opts_res.index(_default_res) if _default_res in _opts_res else 0
+                    rp = st.selectbox("Résultat", _opts_res, index=_res_idx, key="me_rg",
+                                       help="Pré-rempli avec le résultat du catalogue si disponible.")
                     _heure = sr.get("Heure", "")
                     hp = str(_heure) if pd.notna(_heure) else ""
                 if st.button("✅ Ajouter à mes paris",use_container_width=True,key="me_ag"):
@@ -781,505 +1297,151 @@ elif page == "👤 Mes paris":
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# EN ATTENTE
+# ══════════════════════════════════════════════════════════════════════════════
+elif page == "⏳ En attente":
+    st.markdown("# ⏳ Paris en attente")
+    st.caption(
+        "Tous tes paris non résolus, avec une estimation de leur valeur espérée "
+        "basée sur ton historique par sport."
+    )
+
+    col_src_p, _ = st.columns([4, 4])
+    with col_src_p:
+        src_pend = st.radio(
+            "Source",
+            ["📋 Catalogue général", "👤 Mes paris", "🔀 Les deux"],
+            horizontal=True,
+            key="pend_src",
+        )
+
+    if "Catalogue" in src_pend:
+        df_pend = df_gen.copy()
+    elif "Mes paris" in src_pend:
+        df_pend = df_me.copy()
+    else:
+        df_pend = pd.concat([df_gen.copy(), df_me.copy()], ignore_index=True)
+
+    pending_raw = df_pend[df_pend["Validé ?"] == "?"]
+    if pending_raw.empty:
+        st.success("✅ Aucun pari en attente ! Tout est à jour.")
+    else:
+        pend_df = analyse_pending(df_pend)
+
+        total_at_stake  = pend_df["Mise (€)"].sum()
+        total_best      = pend_df["Gain si ✅ (€)"].sum()
+        total_esperance = pend_df["Espérance (€)"].sum()
+
+        kp1, kp2, kp3, kp4 = st.columns(4)
+        with kp1:
+            st.markdown(kpi("Paris en attente", len(pend_df), "yellow"), unsafe_allow_html=True)
+        with kp2:
+            st.markdown(kpi("Mise totale en jeu", f"{total_at_stake:.2f} €", "blue",
+                help_text="Somme de toutes les mises sur les paris non résolus."), unsafe_allow_html=True)
+        with kp3:
+            st.markdown(kpi("Gain max (tout gagne)", f"+{total_best:.2f} €", "green",
+                "Si tous les paris sont gagnés"), unsafe_allow_html=True)
+        with kp4:
+            ev_color = "green" if total_esperance >= 0 else "red"
+            st.markdown(kpi("Espérance totale", f"{total_esperance:+.2f} €", ev_color,
+                "Win rate historique × cote",
+                "Somme des espérances de chaque pari. Positif = mathématiquement avantageux sur l'ensemble."),
+                unsafe_allow_html=True)
+
+        st.divider()
+
+        section_header(
+            "Détail des paris en attente",
+            "**EV estimé** = Win Rate historique par sport × Cote − 1. "
+            "Positif ✅ = pari théoriquement avantageux. "
+            "Négatif ⚠️ = la cote ne compense pas assez le risque historique. "
+            "**Win Rate sport %** = calculé sur tes paris terminés pour ce sport "
+            "(si <3 paris pour ce sport, le win rate global est utilisé).",
+        )
+
+        disp_p = pend_df.copy()
+        disp_p["Date"]  = pd.to_datetime(disp_p["Date"]).dt.strftime("%d/%m").fillna("")
+        disp_p["EV OK"] = disp_p["EV estimé"].apply(lambda x: "✅" if x > 0 else "⚠️")
+        disp_p["Basé sur"] = disp_p["_wr_src"]
+        cols_show = ["Date","Sport","Événement","Pari","Cote","Mise (€)",
+                     "Gain si ✅ (€)","Win Rate sport %","EV estimé","Espérance (€)","EV OK","Basé sur"]
+        st.dataframe(
+            disp_p[cols_show],
+            hide_index=True, use_container_width=True,
+            column_config={
+                "Cote":               st.column_config.NumberColumn(format="%.2f"),
+                "Mise (€)":           st.column_config.NumberColumn(format="%.2f €"),
+                "Gain si ✅ (€)":     st.column_config.NumberColumn(format="%.2f €"),
+                "Win Rate sport %":   st.column_config.NumberColumn(format="%.1f%%"),
+                "EV estimé":          st.column_config.NumberColumn(format="%.3f"),
+                "Espérance (€)":      st.column_config.NumberColumn(format="%.2f €"),
+            },
+        )
+        export_button(disp_p[cols_show], "paris_en_attente.csv", "📥 Exporter CSV")
+
+        st.divider()
+
+        section_header(
+            "Simulateur de scénarios",
+            "Déplace le curseur pour simuler combien de paris tu gagnes parmi ceux en attente. "
+            "Les paris avec le meilleur EV sont considérés gagnés en premier.",
+        )
+        n_pend = len(pend_df)
+        default_pct = int(pend_df["Win Rate sport %"].mean()) if not pend_df.empty else 50
+        pct_win = st.slider(
+            "% de paris gagnés (simulation)", 0, 100, default_pct, step=5,
+            key="pend_slider",
+            format="%d%%",
+        )
+        n_wins = round(n_pend * pct_win / 100)
+        sorted_bets = pend_df.sort_values("EV estimé", ascending=False).reset_index(drop=True)
+        winners = sorted_bets.iloc[:n_wins]
+        losers  = sorted_bets.iloc[n_wins:]
+        sim_result = float(winners["Gain si ✅ (€)"].sum()) - float(losers["Mise (€)"].sum())
+        sim_roi    = sim_result / total_at_stake * 100 if total_at_stake > 0 else 0.0
+
+        sc1, sc2, sc3, sc4 = st.columns(4)
+        with sc1: st.metric("Paris gagnés", f"{n_wins} / {n_pend}")
+        with sc2: st.metric("Paris perdus",  f"{n_pend - n_wins} / {n_pend}")
+        with sc3: st.metric("Résultat simulé", f"{sim_result:+.2f} €")
+        with sc4: st.metric("ROI simulé", f"{sim_roi:+.1f}%")
+
+        # Bar chart: gain/perte potentielle par pari
+        st.divider()
+        section_header(
+            "Gain potentiel par pari",
+            "**Barres vertes** = gain net si le pari est gagné. "
+            "**Ligne rouge** = perte si le pari est perdu (= la mise).",
+        )
+        bar_df = pend_df.sort_values("EV estimé", ascending=False).copy()
+        bar_df["Label"] = bar_df["Événement"].str[:25] + " · " + bar_df["Sport"]
+        fig_bar = go.Figure()
+        fig_bar.add_trace(go.Bar(
+            x=bar_df["Label"], y=bar_df["Gain si ✅ (€)"],
+            name="Gain si gagné",
+            marker_color=bar_df["EV estimé"].apply(lambda x: "#4ade80" if x > 0 else "#fbbf24"),
+            text=bar_df["EV estimé"].apply(lambda x: f"EV {x:+.2f}"),
+            textposition="outside",
+            hovertemplate="<b>%{x}</b><br>Gain : +%{y:.2f} €<extra></extra>",
+        ))
+        fig_bar.add_trace(go.Scatter(
+            x=bar_df["Label"], y=-bar_df["Mise (€)"],
+            mode="markers", name="Perte si perdu",
+            marker=dict(color="#f87171", size=9, symbol="diamond"),
+            hovertemplate="<b>%{x}</b><br>Perte : %{y:.2f} €<extra></extra>",
+        ))
+        fig_bar.add_hline(y=0, line_dash="dash", line_color="rgba(255,255,255,.2)")
+        fig_bar.update_layout(**_chart(height=320, showlegend=True,
+                                        legend=dict(orientation="h", y=1.15)))
+        st.plotly_chart(fig_bar, use_container_width=True)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # ANALYSES
 # ══════════════════════════════════════════════════════════════════════════════
 elif page == "📈 Analyses":
     st.markdown("# 📈 Analyses")
-
-    # ── Sélecteur de source ───────────────────────────────────────────────────
-    col_src, col_exp_btn = st.columns([4, 2])
-    with col_src:
-        src = st.radio(
-            "Source de données",
-            ["📋 Catalogue général", "👤 Mes paris (Maxime)"],
-            horizontal=True,
-            key="analyses_source",
-            help="Le catalogue contient toutes les cotes disponibles. 'Mes paris' = uniquement tes sélections avec tes mises réelles.",
-        )
-    df_a    = df_gen if "Catalogue" in src else df_me
-    played  = df_a[df_a["Validé ?"].isin(["✅","❌"])]
-    src_lbl = "Catalogue général" if "Catalogue" in src else "Mes paris"
-    with col_exp_btn:
-        st.markdown("<br>", unsafe_allow_html=True)
-        export_button(played, f"analyse_{src_lbl.replace(' ','_')}.csv", "📥 Exporter CSV")
-
-    if len(played) < 3:
-        st.warning("Pas assez de données. Valide au moins 3 paris pour voir les analyses.")
-        st.stop()
-
-    # ── KPIs rapides ──────────────────────────────────────────────────────────
-    stats_a  = compute_stats(df_a)
-    streaks_a = streak_stats(df_a)
-    st.divider()
-    kc1,kc2,kc3,kc4,kc5 = st.columns(5)
-    with kc1: st.markdown(kpi("Paris joués", stats_a["total"], "blue",
-        f"{stats_a['wins']}W / {stats_a['losses']}L",
-        "Nombre total de paris terminés dans cette source."), unsafe_allow_html=True)
-    with kc2:
-        wr_a = stats_a["win_rate"]*100
-        st.markdown(kpi("Win Rate", f"{wr_a:.1f}%", "green" if wr_a>=40 else "red",
-        help_text="Pourcentage de paris gagnés parmi les paris terminés."), unsafe_allow_html=True)
-    with kc3:
-        b_a = stats_a["benefice"]
-        st.markdown(kpi("Bénéfice", f"{b_a:+.2f} €", "green" if b_a>=0 else "red",
-        f"ROI {stats_a['roi']*100:.1f}%",
-        "Gains nets totaux. ROI = Bénéfice / Mises totales × 100."), unsafe_allow_html=True)
-    with kc4:
-        ev_a = stats_a["ev_moyen"]
-        st.markdown(kpi("EV moyen", f"{ev_a:+.3f}", "green" if ev_a>0 else "red",
-        help_text="Espérance de valeur : p × cote - 1. Positif = avantage mathématique."), unsafe_allow_html=True)
-    with kc5:
-        sc_a = "green" if streaks_a["current_type"]=="✅" else "red"
-        st.markdown(kpi("Série en cours", f"{streaks_a['current_type']} ×{streaks_a['current_val']}", sc_a,
-        f"Record: {streaks_a['best_win']}W / {streaks_a['best_loss']}L",
-        "Série de résultats identiques consécutifs."), unsafe_allow_html=True)
-
-    st.divider()
-
-    # ── Courbe de bénéfice + Donut ────────────────────────────────────────────
-    section_header("Courbe de bénéfice cumulé",
-        "Évolution de ton bénéfice au fil des paris. Chaque point = un pari terminé. "
-        "Les marqueurs verts = victoires, les croix rouges = défaites. "
-        "Une courbe qui monte régulièrement indique une stratégie solide.")
-    col_curve, col_donut = st.columns([3, 2])
-    with col_curve:
-        pl_sorted = played.reset_index(drop=True).copy()
-        pl_sorted["N"]     = range(1, len(pl_sorted)+1)
-        pl_sorted["Cumul"] = pl_sorted["Gain réel"].cumsum()
-        fig_curve = go.Figure()
-        fig_curve.add_trace(go.Scatter(x=pl_sorted["N"], y=pl_sorted["Cumul"],
-            mode="lines", line=dict(color="#818cf8", width=2.5),
-            fill="tozeroy", fillcolor="rgba(129,140,248,.1)",
-            hovertemplate="Pari #%{x}<br><b>%{y:+.2f} €</b><extra></extra>", name="Bénéfice"))
-        w2 = pl_sorted[pl_sorted["Validé ?"]=="✅"]
-        l2 = pl_sorted[pl_sorted["Validé ?"]=="❌"]
-        fig_curve.add_trace(go.Scatter(x=w2["N"], y=w2["Cumul"], mode="markers",
-            marker=dict(color="#4ade80", size=6), name="Gagné",
-            hovertemplate="%{y:+.2f} €<extra>✅</extra>"))
-        fig_curve.add_trace(go.Scatter(x=l2["N"], y=l2["Cumul"], mode="markers",
-            marker=dict(color="#f87171", size=6, symbol="x"), name="Perdu",
-            hovertemplate="%{y:+.2f} €<extra>❌</extra>"))
-        fig_curve.add_hline(y=0, line_dash="dash", line_color="rgba(255,255,255,.2)")
-        fig_curve.update_layout(**_chart(height=280, showlegend=True,
-                                          legend=dict(orientation="h", y=1.15)))
-        st.plotly_chart(fig_curve, use_container_width=True)
-    with col_donut:
-        fig_dn = go.Figure(go.Pie(
-            labels=["Gagnés","Perdus","En attente"],
-            values=[stats_a["wins"], stats_a["losses"], stats_a["pending"]],
-            hole=0.65, marker=dict(colors=["#4ade80","#f87171","#fbbf24"]),
-            textinfo="percent",
-            hovertemplate="<b>%{label}</b><br>%{value} paris (%{percent})<extra></extra>"))
-        fig_dn.add_annotation(text=f"<b>{wr_a:.0f}%</b><br>win rate",
-            x=0.5, y=0.5, font=dict(size=16, color="#e2e8f0"), showarrow=False)
-        fig_dn.update_layout(**_chart(height=280, showlegend=True,
-                                       legend=dict(orientation="h", y=-0.1)))
-        st.plotly_chart(fig_dn, use_container_width=True)
-
-    st.divider()
-
-    # ── Win Rate roulant ──────────────────────────────────────────────────────
-    rw_window = 5
-    rw_df = rolling_win_rate(df_a, window=rw_window)
-    if not rw_df.empty:
-        col_roll = f"Win Rate roulant ({rw_window} paris) %"
-        section_header(f"Win Rate roulant ({rw_window} paris)",
-            f"Chaque point = win rate calculé sur les **{rw_window} derniers paris**. "
-            "Permet de voir si tu es en forme ou en difficulté en ce moment. "
-            "**Ligne pointillée** = win rate global depuis le début. "
-            "Une courbe qui monte = amélioration de la sélection.")
-        fig_rw = go.Figure()
-        fig_rw.add_trace(go.Scatter(
-            x=rw_df["N"], y=rw_df[col_roll],
-            mode="lines+markers", name=f"Win Rate roulant ({rw_window})",
-            line=dict(color="#818cf8", width=2.5),
-            marker=dict(size=5),
-            hovertemplate="Pari #%{x}<br>Win Rate roulant : <b>%{y:.1f}%</b><extra></extra>"))
-        fig_rw.add_trace(go.Scatter(
-            x=rw_df["N"], y=rw_df["Win Rate global %"],
-            mode="lines", name="Win Rate global",
-            line=dict(color="#fbbf24", width=1.5, dash="dot"),
-            hovertemplate="Pari #%{x}<br>Win Rate global : %{y:.1f}%<extra></extra>"))
-        fig_rw.add_hline(y=50, line_dash="dash", line_color="rgba(255,255,255,.15)",
-                          annotation_text="50%", annotation_font_color="#64748b")
-        fig_rw.update_layout(**_chart(height=260, showlegend=True,
-                                       legend=dict(orientation="h", y=1.15),
-                                       yaxis=dict(ticksuffix="%", range=[0, 105])))
-        st.plotly_chart(fig_rw, use_container_width=True)
-        st.divider()
-
-    # ── P&L mensuel ───────────────────────────────────────────────────────────
-    section_header("P&L mensuel",
-        "**Barres** = bénéfice net du mois (vert = profitable, rouge = en perte). "
-        "**Ligne cyan** = Win Rate du mois (axe droit). "
-        "Permet de voir si tes performances s'améliorent avec le temps.")
-    if not played["Date"].isna().all():
-        monthly = played.copy()
-        monthly["Mois"] = monthly["Date"].dt.to_period("M").astype(str)
-        monthly_pnl = monthly.groupby("Mois").apply(
-            lambda g: pd.Series({
-                "Bénéfice": round(float(g["Gain réel"].sum()), 2),
-                "Paris": len(g),
-                "Win Rate %": round((g["Validé ?"]=="✅").sum() / len(g) * 100, 1),
-            })
-        ).reset_index()
-        if not monthly_pnl.empty:
-            fig_monthly = go.Figure()
-            fig_monthly.add_trace(go.Bar(
-                x=monthly_pnl["Mois"], y=monthly_pnl["Bénéfice"],
-                name="Bénéfice (€)",
-                marker_color=monthly_pnl["Bénéfice"].apply(lambda x: "#4ade80" if x >= 0 else "#f87171"),
-                text=monthly_pnl["Bénéfice"].apply(lambda x: f"{x:+.2f} €"),
-                textposition="outside",
-                hovertemplate="<b>%{x}</b><br>Bénéfice : %{y:+.2f} €<br>%{customdata[0]} paris<extra></extra>",
-                customdata=monthly_pnl[["Paris"]].values,
-            ))
-            fig_monthly.add_trace(go.Scatter(
-                x=monthly_pnl["Mois"], y=monthly_pnl["Win Rate %"],
-                name="Win Rate %", yaxis="y2", mode="lines+markers",
-                line=dict(color="#22d3ee", width=2), marker=dict(size=7),
-                hovertemplate="%{x}<br>Win Rate : %{y:.0f}%<extra></extra>"))
-            fig_monthly.add_hline(y=0, line_dash="dash", line_color="rgba(255,255,255,.2)")
-            fig_monthly.update_layout(**_chart(height=280, title="Bénéfice net et Win Rate par mois",
-                yaxis2=dict(overlaying="y", side="right", title="Win Rate %",
-                            color="#22d3ee", showgrid=False, ticksuffix="%", range=[0, 105]),
-                legend=dict(orientation="h", y=1.15)))
-            st.plotly_chart(fig_monthly, use_container_width=True)
-
-    st.divider()
-
-    # ── Par sport ─────────────────────────────────────────────────────────────
-    section_header("Performance par sport",
-        "**Win Rate** = % de paris gagnés. **ROI** = rentabilité nette (bénéfice / total misé × 100). "
-        "**Boost moy.** = augmentation moyenne de cote offerte par le bookmaker sur ce sport.")
-    sp_df = stats_by_sport(df_a)
-    if not sp_df.empty:
-        ca, cb = st.columns([5, 4])
-        with ca:
-            dsp = sp_df[["Sport","Paris","Gagnés","Win Rate %","Bénéfice (€)","ROI %","Cote moy.","Boost moy. %"]].copy()
-            dsp["Win Rate %"]   = dsp["Win Rate %"].apply(lambda x: f"{x:.0f}%")
-            dsp["ROI %"]        = dsp["ROI %"].apply(lambda x: f"{x:+.1f}%")
-            dsp["Boost moy. %"] = dsp["Boost moy. %"].apply(lambda x: f"+{x:.1f}%")
-            st.dataframe(dsp, hide_index=True, use_container_width=True)
-        with cb:
-            fig_sp = px.bar(sp_df, x="Sport", y="ROI %", color="ROI %",
-                color_continuous_scale=["#f87171","#fbbf24","#4ade80"],
-                text=sp_df["ROI %"].apply(lambda x: f"{x:+.1f}%"), title="ROI par sport")
-            fig_sp.add_hline(y=0, line_dash="dash", line_color="rgba(255,255,255,.3)")
-            fig_sp.update_traces(textposition="outside")
-            fig_sp.update_layout(**_chart(height=300, coloraxis_showscale=False))
-            st.plotly_chart(fig_sp, use_container_width=True)
-
-    st.divider()
-
-    # ── Heatmap Sport × Jour ──────────────────────────────────────────────────
-    section_header("Heatmap Sport × Jour de la semaine",
-        "Chaque cellule = win rate (%) pour ce sport ce jour-là. "
-        "**Vert** = bon win rate, **Rouge** = mauvais, **Gris** = aucun pari ce jour pour ce sport. "
-        "Exemple : si le Basketball le lundi est vert, c'est ton meilleur combo sport/jour.")
-    hm = heatmap_sport_day(df_a)
-    if not hm.empty:
-        fig_hm = go.Figure(go.Heatmap(
-            z=hm.values, x=hm.columns.tolist(), y=hm.index.tolist(),
-            colorscale=[[0,"#f87171"],[0.5,"#fbbf24"],[1,"#4ade80"]],
-            zmin=0, zmax=100,
-            text=[[f"{v:.0f}%" if not pd.isna(v) else "" for v in row] for row in hm.values],
-            texttemplate="%{text}",
-            hovertemplate="<b>%{y}</b> — %{x}<br>Win Rate : %{z:.0f}%<extra></extra>",
-            colorbar=dict(title="Win Rate %", ticksuffix="%"),
-        ))
-        fig_hm.update_layout(**_chart(height=max(250, len(hm)*50+60), title="Win Rate % par sport et jour"))
-        st.plotly_chart(fig_hm, use_container_width=True)
-    else:
-        st.info("Pas assez de données avec des dates pour afficher la heatmap.")
-
-    st.divider()
-
-    # ── Catégorie + Jour côte à côte ──────────────────────────────────────────
-    col_t, col_d = st.columns(2)
-    with col_t:
-        section_header("Par catégorie de pari",
-            "**Buteur/Marqueur** = pari sur un joueur qui marque. "
-            "**Over/Under** = pari sur le total de points/buts. "
-            "**Performance combinée** = pari impliquant plusieurs conditions ('et'). "
-            "Identifie les types de paris où tu excelles vraiment.")
-        ty = stats_by_type(df_a)
-        if not ty.empty:
-            fig_ty = px.bar(ty, x="Catégorie", y="ROI %", color="Win Rate %",
-                color_continuous_scale=["#f87171","#fbbf24","#4ade80"],
-                text=ty["ROI %"].apply(lambda x: f"{x:+.1f}%"),
-                title="ROI par catégorie",
-                hover_data={"Paris": True, "Gagnés": True, "Bénéfice (€)": True})
-            fig_ty.add_hline(y=0, line_dash="dash", line_color="rgba(255,255,255,.2)")
-            fig_ty.update_traces(textposition="outside")
-            fig_ty.update_layout(**_chart(height=300, coloraxis_showscale=False,
-                                           xaxis=dict(tickangle=-25)))
-            st.plotly_chart(fig_ty, use_container_width=True)
-            dty = ty[["Catégorie","Paris","Gagnés","Win Rate %","ROI %","Bénéfice (€)"]].copy()
-            dty["Win Rate %"] = dty["Win Rate %"].apply(lambda x: f"{x:.0f}%")
-            dty["ROI %"]      = dty["ROI %"].apply(lambda x: f"{x:+.1f}%")
-            st.dataframe(dty, hide_index=True, use_container_width=True)
-
-    with col_d:
-        section_header("Par jour de la semaine",
-            "Win rate et ROI selon le jour où tu as parié. "
-            "Certains jours sont meilleurs car les compétitions diffèrent "
-            "(ex: Champions League mercredi, NBA quotidien, matchs du week-end). "
-            "La couleur = ROI, la hauteur = win rate.")
-        day_df = stats_by_day(df_a)
-        if not day_df.empty:
-            fig_day = px.bar(day_df, x="Jour", y="Win Rate %", color="ROI %",
-                color_continuous_scale=["#f87171","#fbbf24","#4ade80"],
-                text=day_df["Win Rate %"].apply(lambda x: f"{x:.0f}%"),
-                title="Win rate & ROI par jour",
-                hover_data={"Paris": True, "Bénéfice (€)": True})
-            fig_day.update_traces(textposition="outside")
-            fig_day.update_layout(**_chart(height=300, coloraxis_showscale=False))
-            st.plotly_chart(fig_day, use_container_width=True)
-            dday = day_df[["Jour","Paris","Win Rate %","ROI %","Bénéfice (€)"]].copy()
-            dday["Win Rate %"] = dday["Win Rate %"].apply(lambda x: f"{x:.0f}%")
-            dday["ROI %"]      = dday["ROI %"].apply(lambda x: f"{x:+.1f}%")
-            st.dataframe(dday, hide_index=True, use_container_width=True)
-
-    st.divider()
-
-    # ── Créneau horaire ───────────────────────────────────────────────────────
-    section_header("Par créneau horaire",
-        "**Matin** = 6h-12h, **Après-midi** = 12h-18h, **Soir** = 18h-23h, **Nuit** = 23h-6h. "
-        "Montre si tu analyses mieux à certaines heures, ou si les compétitions du soir sont plus prévisibles.")
-    hr_df = stats_by_hour(df_a)
-    if not hr_df.empty:
-        col_h1, col_h2 = st.columns([3, 2])
-        with col_h1:
-            dhr = hr_df[["Créneau","Paris","Win Rate %","ROI %","Bénéfice (€)"]].copy()
-            dhr["Win Rate %"] = dhr["Win Rate %"].apply(lambda x: f"{x:.0f}%")
-            dhr["ROI %"]      = dhr["ROI %"].apply(lambda x: f"{x:+.1f}%")
-            st.dataframe(dhr, hide_index=True, use_container_width=True)
-        with col_h2:
-            fig_hr = px.bar(hr_df, x="Créneau", y="Win Rate %", color="ROI %",
-                color_continuous_scale=["#f87171","#fbbf24","#4ade80"],
-                text=hr_df["Win Rate %"].apply(lambda x: f"{x:.0f}%"),
-                title="Win rate par créneau",
-                hover_data={"Paris": True, "Bénéfice (€)": True})
-            fig_hr.update_traces(textposition="outside")
-            fig_hr.update_layout(**_chart(height=260, coloraxis_showscale=False))
-            st.plotly_chart(fig_hr, use_container_width=True)
-    else:
-        st.info("Heures non renseignées pour suffisamment de paris.")
-
-    st.divider()
-
-    # ── Boost + Plage de cote ─────────────────────────────────────────────────
-    col_b, col_o = st.columns(2)
-    with col_b:
-        section_header("Efficacité par tranche de boost",
-            "Groupe tes paris selon l'ampleur du boost. "
-            "Ex : cote 2.00 → 2.50 = boost +25% → tranche '20-35%'. "
-            "Un gros boost ne signifie pas un pari plus facile. "
-            "Cette analyse révèle si les gros boosts sont rentables ou du marketing.")
-        boost_df = boost_efficiency(df_a)
-        if not boost_df.empty:
-            boost_df["label"] = boost_df.apply(
-                lambda r: f"{r['Win Rate %']:.0f}%\n({int(r['Paris'])} paris)", axis=1)
-            fig_boost = px.bar(boost_df, x="Tranche boost", y="Win Rate %", color="ROI %",
-                color_continuous_scale=["#f87171","#fbbf24","#4ade80"],
-                text="label", title="Win rate par tranche de boost",
-                hover_data={"Paris": True, "ROI %": ":.1f", "Bénéfice (€)": True, "label": False})
-            fig_boost.update_traces(textposition="outside")
-            fig_boost.update_layout(**_chart(height=300, coloraxis_showscale=False))
-            st.plotly_chart(fig_boost, use_container_width=True)
-
-    with col_o:
-        section_header("Performance par plage de cote boostée",
-            "**Barre** = win rate (axe gauche). **Ligne cyan** = ROI (axe droit). "
-            "Un bon win rate avec un ROI faible = les gains ne compensent pas les mises. "
-            "Cherche les plages avec les deux indicateurs élevés.")
-        odds_df = stats_by_odds_range(df_a)
-        if not odds_df.empty:
-            fig_odds = go.Figure()
-            fig_odds.add_trace(go.Bar(x=odds_df["Tranche cote"], y=odds_df["Win Rate %"],
-                name="Win Rate %", marker_color="#818cf8",
-                text=odds_df["Win Rate %"].apply(lambda x: f"{x:.0f}%"), textposition="outside",
-                hovertemplate="%{x}<br>Win Rate : %{y:.0f}%<br>%{customdata} paris<extra></extra>",
-                customdata=odds_df["Paris"]))
-            fig_odds.add_trace(go.Scatter(x=odds_df["Tranche cote"], y=odds_df["ROI %"],
-                name="ROI %", yaxis="y2", mode="lines+markers",
-                line=dict(color="#22d3ee", width=2), marker=dict(size=8),
-                hovertemplate="%{x}<br>ROI : %{y:.1f}%<extra></extra>"))
-            fig_odds.update_layout(**_chart(height=300, title="Win rate & ROI par plage de cote",
-                yaxis2=dict(overlaying="y", side="right", title="ROI %", color="#22d3ee", showgrid=False),
-                legend=dict(orientation="h", y=1.15)))
-            st.plotly_chart(fig_odds, use_container_width=True)
-
-    st.divider()
-
-    # ── Scatter cote vs gain + Distribution des mises ─────────────────────────
-    col_sc, col_hist = st.columns([3, 2])
-    with col_sc:
-        section_header("Cote boostée vs Gain réel",
-            "Chaque bulle = un pari. **Taille** = mise. **Vert** = gagné, **Rouge** = perdu. "
-            "Idéalement : bulles vertes en haut à droite (grosse cote + gros gain), "
-            "rouges en bas à gauche (petite mise perdue).")
-        played2 = played.copy()
-        played2["Résultat"] = played2["Validé ?"].map({"✅":"Gagné","❌":"Perdu"})
-        fig_sc = px.scatter(played2, x="Cote boostée", y="Gain réel", color="Résultat",
-            color_discrete_map={"Gagné":"#4ade80","Perdu":"#f87171"},
-            size="Misé", size_max=18,
-            hover_data=["Événement","Pari","Sport","Date"],
-            title="Chaque bulle = un pari (taille = mise)")
-        fig_sc.add_hline(y=0, line_dash="dash", line_color="rgba(255,255,255,.2)")
-        fig_sc.update_layout(**_chart(height=340))
-        st.plotly_chart(fig_sc, use_container_width=True)
-
-    with col_hist:
-        section_header("Distribution des mises",
-            "Histogramme de la répartition de tes mises. "
-            "Montre si tu mises de façon homogène ou si tu varies beaucoup. "
-            "Une gestion de bankroll saine implique des mises régulières et limitées.")
-        if "Misé" in played.columns and played["Misé"].notna().any():
-            mise_data = played["Misé"].dropna()
-            fig_hist = go.Figure(go.Histogram(
-                x=mise_data,
-                nbinsx=min(15, len(mise_data)),
-                marker_color="#818cf8",
-                marker_line=dict(color="#1e1b4b", width=1),
-                hovertemplate="Mise %{x:.1f} € : <b>%{y} paris</b><extra></extra>",
-            ))
-            mean_mise = mise_data.mean()
-            fig_hist.add_vline(x=mean_mise, line_dash="dash", line_color="#fbbf24",
-                               annotation_text=f"Moy. {mean_mise:.1f} €",
-                               annotation_font_color="#fbbf24")
-            fig_hist.update_layout(**_chart(height=340, title="Répartition des mises (€)",
-                                            xaxis_title="Mise (€)", yaxis_title="Nombre de paris"))
-            st.plotly_chart(fig_hist, use_container_width=True)
-
-            m1, m2, m3 = st.columns(3)
-            with m1: st.metric("Mise min", f"{mise_data.min():.2f} €")
-            with m2: st.metric("Mise moy.", f"{mean_mise:.2f} €")
-            with m3: st.metric("Mise max", f"{mise_data.max():.2f} €")
-
-    st.divider()
-
-    # ── Palmarès ──────────────────────────────────────────────────────────────
-    section_header("Palmarès — Meilleurs & Pires paris",
-        "**Top 5 gains** = tes paris les plus rentables (gain net le plus élevé). "
-        "**Pires 5** = les paris qui t'ont le plus coûté. "
-        "Utile pour identifier les types de paris à répéter (ou éviter).")
-    col_top, col_flop = st.columns(2)
-    with col_top:
-        st.markdown('<p style="color:#4ade80;font-weight:600;margin-bottom:6px">🏆 Top 5 — Meilleurs gains</p>', unsafe_allow_html=True)
-        top5 = played.nlargest(5, "Gain réel")[["Date","Sport","Événement","Pari","Cote boostée","Misé","Gain réel","Validé ?"]].copy()
-        top5["Date"] = top5["Date"].dt.strftime("%d/%m").fillna("")
-        top5["Pari"] = top5["Pari"].apply(lambda x: str(x)[:40])
-        st.dataframe(top5, hide_index=True, use_container_width=True,
-            column_config={
-                "Cote boostée": st.column_config.NumberColumn(format="%.2f"),
-                "Misé":         st.column_config.NumberColumn(format="%.2f €"),
-                "Gain réel":    st.column_config.NumberColumn(format="%.2f €"),
-            })
-    with col_flop:
-        st.markdown('<p style="color:#f87171;font-weight:600;margin-bottom:6px">💔 Pires 5 — Plus grosses pertes</p>', unsafe_allow_html=True)
-        flop5 = played.nsmallest(5, "Gain réel")[["Date","Sport","Événement","Pari","Cote boostée","Misé","Gain réel","Validé ?"]].copy()
-        flop5["Date"] = flop5["Date"].dt.strftime("%d/%m").fillna("")
-        flop5["Pari"] = flop5["Pari"].apply(lambda x: str(x)[:40])
-        st.dataframe(flop5, hide_index=True, use_container_width=True,
-            column_config={
-                "Cote boostée": st.column_config.NumberColumn(format="%.2f"),
-                "Misé":         st.column_config.NumberColumn(format="%.2f €"),
-                "Gain réel":    st.column_config.NumberColumn(format="%.2f €"),
-            })
-
-    st.divider()
-
-    # ── Comparatif Catalogue vs Mes Paris ─────────────────────────────────────
-    section_header("Comparatif Catalogue général vs Mes paris",
-        "Compare tes résultats personnels avec l'ensemble du catalogue. "
-        "Si ton win rate personnel est supérieur au catalogue, tu as un bon sens de la sélection — "
-        "tu choisis mieux que la moyenne des cotes disponibles.")
-    stats_cat = compute_stats(df_gen)
-    stats_perso = compute_stats(df_me)
-    comp_data = {
-        "Source":      ["Catalogue général", "Mes paris"],
-        "Paris":       [stats_cat["total"], stats_perso["total"]],
-        "Win Rate %":  [round(stats_cat["win_rate"]*100,1), round(stats_perso["win_rate"]*100,1)],
-        "ROI %":       [round(stats_cat["roi"]*100,1), round(stats_perso["roi"]*100,1)],
-        "Bénéfice (€)":[stats_cat["benefice"], stats_perso["benefice"]],
-        "EV moyen":    [stats_cat["ev_moyen"], stats_perso["ev_moyen"]],
-    }
-    comp_df = pd.DataFrame(comp_data)
-    cc1, cc2, cc3 = st.columns(3)
-    metrics_comp = [
-        ("Win Rate %",   "%",  True),
-        ("ROI %",        "%",  True),
-        ("Bénéfice (€)", "€",  True),
-    ]
-    for col, (metric, unit, higher_better) in zip([cc1, cc2, cc3], metrics_comp):
-        with col:
-            v_cat   = comp_df.loc[comp_df["Source"]=="Catalogue général", metric].values[0]
-            v_perso = comp_df.loc[comp_df["Source"]=="Mes paris", metric].values[0]
-            delta   = v_perso - v_cat
-            delta_str = f"{delta:+.1f}{unit}"
-            st.metric(f"📋 {metric}", f"{v_cat:.1f}{unit}")
-            st.metric(f"👤 {metric}", f"{v_perso:.1f}{unit}",
-                       delta=delta_str,
-                       delta_color="normal" if higher_better else "inverse",
-                       help=f"Delta = Mes paris − Catalogue. Positif = tu sélectionnes mieux que le catalogue.")
-
-    fig_comp = go.Figure()
-    for i, row in comp_df.iterrows():
-        color = "#818cf8" if "Catalogue" in row["Source"] else "#22d3ee"
-        fig_comp.add_trace(go.Bar(
-            name=row["Source"],
-            x=["Win Rate %", "ROI %"],
-            y=[row["Win Rate %"], row["ROI %"]],
-            marker_color=color,
-            text=[f"{row['Win Rate %']:.1f}%", f"{row['ROI %']:+.1f}%"],
-            textposition="outside",
-        ))
-    fig_comp.add_hline(y=0, line_dash="dash", line_color="rgba(255,255,255,.2)")
-    fig_comp.update_layout(**_chart(height=280, barmode="group",
-                                     title="Catalogue vs Mes paris",
-                                     legend=dict(orientation="h", y=1.12)))
-    st.plotly_chart(fig_comp, use_container_width=True)
-
-    st.divider()
-
-    # ── Simulation Kelly ──────────────────────────────────────────────────────
-    section_header("Simulation : Kelly vs mise réelle",
-        "Simule ce qu'aurait été ta bankroll en appliquant le **critère de Kelly fractionnel** "
-        "depuis le début. Kelly calcule la mise optimale selon le win rate historique par sport. "
-        "**Kelly/2** = version conservatrice qui limite le risque de ruine. "
-        f"Bankroll initiale simulée : {bankroll:.0f} €.")
-    sim_df = simulate_kelly_bankroll(df_a, initial_bankroll=bankroll)
-    if not sim_df.empty:
-        fig_sim = go.Figure()
-        fig_sim.add_trace(go.Scatter(x=sim_df["N"], y=sim_df["Bankroll réelle"],
-            mode="lines", line=dict(color="#22d3ee", width=2), name="Mise réelle",
-            hovertemplate="Pari #%{x}<br>Bankroll réelle : %{y:.2f} €<extra></extra>"))
-        fig_sim.add_trace(go.Scatter(x=sim_df["N"], y=sim_df["Bankroll Kelly"],
-            mode="lines", line=dict(color="#fbbf24", width=2, dash="dash"), name="Kelly /2 (simulé)",
-            hovertemplate="Pari #%{x}<br>Kelly simulé : %{y:.2f} €<extra></extra>"))
-        fig_sim.add_hline(y=bankroll, line_dash="dot", line_color="rgba(255,255,255,.2)",
-                           annotation_text=f"Bankroll initiale ({bankroll:.0f}€)")
-        fig_sim.update_layout(**_chart(height=300, title="Évolution de bankroll : Réel vs Kelly",
-                                        legend=dict(orientation="h", y=1.12)))
-        st.plotly_chart(fig_sim, use_container_width=True)
-
-    # ── Kelly par sport ───────────────────────────────────────────────────────
-    section_header("Critère de Kelly par sport",
-        "**Kelly %** = fraction théorique optimale de la bankroll à miser. "
-        "**Kelly /2 %** = version fractionnelle recommandée (réduit le risque de ruine). "
-        f"**Mise suggérée** = montant pour une bankroll de {bankroll:.0f} €. "
-        "Kelly négatif ou nul = ne pas miser sur ce sport selon l'historique.")
-    kelly_df = kelly_by_sport(df_a, bankroll=bankroll)
-    if not kelly_df.empty:
-        st.caption(f"Bankroll : **{bankroll:.0f} €** — modifiable dans la sidebar.")
-        st.dataframe(kelly_df, hide_index=True, use_container_width=True,
-            column_config={
-                f"Mise suggérée ({bankroll:.0f}€)": st.column_config.NumberColumn(format="%.2f €"),
-            })
-    else:
-        st.info("Minimum 3 paris par sport requis pour calculer Kelly.")
+    render_analyses(df_gen, df_me, bankroll)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
